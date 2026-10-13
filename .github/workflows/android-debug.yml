@@ -2,7 +2,7 @@ name: Rota Certa Android Debug
 
 on:
   push:
-    branches: [build-3-rota-certa]
+    branches: [build-4-rota-certa]
   workflow_dispatch:
 
 concurrency:
@@ -33,5 +33,5 @@ jobs:
           gradle :app:assembleDebug -PMAPS_API_KEY="$KEY" --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: rota-certa-build-3-debug
+          name: rota-certa-build-4-debug
           path: app/build/outputs/apk/debug/app-debug.apk
