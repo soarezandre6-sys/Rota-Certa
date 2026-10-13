@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private var map: GoogleMap? = null
     private var recordedPolyline: Polyline? = null
     private var navigator: Navigator? = null
+    private var arrivalListener: Navigator.ArrivalListener? = null
     private var startedAt: Long = 0L
     private var lastSavedRoute: RecordedRoute? = null
 
@@ -96,6 +97,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onNavigatorReady(readyNavigator: Navigator) {
                     navigator = readyNavigator
                     readyNavigator.setTaskRemovedBehavior(Navigator.TaskRemovedBehavior.QUIT_SERVICE)
+                    registerArrivalListener(readyNavigator)
                     statusText.text = "GPS e navegação prontos"
                 }
 
@@ -104,6 +106,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    private fun registerArrivalListener(nav: Navigator) {
+        arrivalListener?.let(nav::removeArrivalListener)
+        arrivalListener = Navigator.ArrivalListener { event ->
+            if (event.isFinalDestination) {
+                statusText.text = "Destino final alcançado"
+            } else {
+                nav.continueToNextDestination()
+                nav.startGuidance()
+                statusText.text = "Seguindo para o próximo trecho da rota salva"
+            }
+        }
+        arrivalListener?.let(nav::addArrivalListener)
     }
 
     private fun startRecording() {
@@ -190,11 +206,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val sampled = samplePoints(route.points, 24)
-        val waypoints = sampled.map {
+        val waypoints = sampled.mapIndexed { index, point ->
             Waypoint.builder()
-                .setLatLng(it.latitude, it.longitude)
-                .setTitle(route.name)
-                .setVehicleStopover(true)
+                .setLatLng(point.latitude, point.longitude)
+                .setTitle(if (index == sampled.lastIndex) route.name else "Trecho ${index + 1}")
+                .setVehicleStopover(index == sampled.lastIndex)
                 .build()
         }
 
@@ -299,7 +315,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         routeRecorder.stop()
-        navigator?.cleanup()
+        val nav = navigator
+        val listener = arrivalListener
+        if (nav != null && listener != null) {
+            nav.removeArrivalListener(listener)
+        }
+        nav?.cleanup()
         navView.onDestroy()
         super.onDestroy()
     }
