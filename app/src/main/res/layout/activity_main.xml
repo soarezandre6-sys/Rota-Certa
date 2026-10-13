@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -18,7 +19,7 @@
         android:layout_marginEnd="12dp"
         android:background="@drawable/bg_location_button"
         android:contentDescription="Centralizar na minha localização"
-        android:elevation="6dp"
+        android:elevation="8dp"
         android:padding="12dp"
         android:src="@drawable/ic_my_location" />
 
@@ -27,21 +28,23 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:background="#E6111827"
+        android:background="@drawable/bg_control_panel"
+        android:elevation="10dp"
         android:orientation="vertical"
-        android:paddingStart="12dp"
-        android:paddingTop="10dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="10dp">
+        android:paddingStart="14dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="18dp">
 
         <TextView
             android:id="@+id/status_text"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingBottom="7dp"
-            android:text="Pronto para gravar uma rota"
-            android:textColor="#FFFFFFFF"
-            android:textSize="16sp"
+            android:paddingStart="2dp"
+            android:paddingBottom="9dp"
+            android:text="Rota Certa • aguardando GPS"
+            android:textColor="#F8FAFC"
+            android:textSize="15sp"
             android:textStyle="bold" />
 
         <LinearLayout
@@ -49,51 +52,69 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal">
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/start_button"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="50dp"
                 android:layout_weight="1"
-                android:text="INICIAR ROTA" />
+                android:text="INICIAR ROTA"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                app:backgroundTint="#0B9A66"
+                app:cornerRadius="14dp" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/stop_button"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="50dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:enabled="false"
-                android:text="PARAR / SALVAR" />
+                android:text="PARAR / SALVAR"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                app:backgroundTint="#D64545"
+                app:cornerRadius="14dp" />
         </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
+            android:layout_marginTop="6dp"
             android:orientation="horizontal">
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/saved_routes_button"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
-                android:text="ROTAS SALVAS" />
+                android:text="ROTAS SALVAS"
+                android:textColor="#FFFFFF"
+                app:backgroundTint="#1557A6"
+                app:cornerRadius="14dp" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/import_image_button"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="IMPORTAR PRINT" />
+                android:text="IMPORTAR PRINT"
+                android:textColor="#FFFFFF"
+                app:backgroundTint="#176B87"
+                app:cornerRadius="14dp" />
         </LinearLayout>
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/navigate_last_button"
             android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="4dp"
-            android:text="NAVEGAR NA ROTA SELECIONADA" />
+            android:layout_height="50dp"
+            android:layout_marginTop="6dp"
+            android:text="NAVEGAR NA ROTA SELECIONADA"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            app:backgroundTint="#0D47A1"
+            app:cornerRadius="14dp" />
     </LinearLayout>
 
 </FrameLayout>
