@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#063A78</color>
+    <color name="rota_certa_blue">#063A78</color>
+    <color name="rota_certa_teal">#04A8C8</color>
+    <color name="rota_certa_green">#18D861</color>
+    <color name="rota_certa_red">#F5222D</color>
+</resources>
