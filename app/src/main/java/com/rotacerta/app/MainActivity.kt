@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.location.Geocoder
 import android.location.Location
 import android.net.Uri
 import android.os.Build
@@ -19,6 +20,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,6 +53,7 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -66,9 +69,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var routeStore: RouteStore
     private lateinit var imageImporter: ImageRouteImporter
 
+    private lateinit var controlPanelBody: LinearLayout
+    private lateinit var panelToggle: TextView
+    private lateinit var navigationInstructionPanel: LinearLayout
+    private lateinit var navigationArrow: TextView
+    private lateinit var navigationPrimaryText: TextView
+    private lateinit var navigationSecondaryText: TextView
+
     private val fusedLocationClient by lazy {
         LocationServices.getFusedLocationProviderClient(this)
     }
+
+    private val streetLookupExecutor = Executors.newSingleThreadExecutor()
+    private val streetNameCache = mutableMapOf<Int, String>()
+    private var pendingStreetLookupIndex: Int? = null
 
     private var map: MapLibreMap? = null
     private var mapStyleReady = false
@@ -89,6 +103,7 @@ class MainActivity : AppCompatActivity() {
     private var localNavigationRoute: RecordedRoute? = null
     private var lastSpokenTurnIndex = -1
     private var offRouteAnnounced = false
+    private var controlsCollapsed = false
 
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
@@ -160,6 +175,12 @@ class MainActivity : AppCompatActivity() {
         stopButton = findViewById(R.id.stop_button)
         navigateButton = findViewById(R.id.navigate_last_button)
         centerLocationButton = findViewById(R.id.center_location_button)
+        controlPanelBody = findViewById(R.id.control_panel_body)
+        panelToggle = findViewById(R.id.panel_toggle)
+        navigationInstructionPanel = findViewById(R.id.navigation_instruction_panel)
+        navigationArrow = findViewById(R.id.navigation_arrow)
+        navigationPrimaryText = findViewById(R.id.navigation_primary_text)
+        navigationSecondaryText = findViewById(R.id.navigation_secondary_text)
 
         applySystemBarInsets()
 
@@ -183,6 +204,7 @@ class MainActivity : AppCompatActivity() {
             loadVectorMapStyle(mapLibreMap)
         }
 
+        panelToggle.setOnClickListener { setControlsCollapsed(!controlsCollapsed) }
         startButton.setOnClickListener { startRecording() }
         stopButton.setOnClickListener { stopAndNameRoute() }
         findViewById<Button>(R.id.saved_routes_button).setOnClickListener { showSavedRoutes() }
@@ -206,11 +228,26 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (hasLocationPermission()) {
-            startLiveLocationUpdates()
-        } else {
-            requestLocationPermission(startRecordingAfter = false)
-        }
+        if (hasLocationPermission()) startLiveLocationUpdates()
+        else requestLocationPermission(startRecordingAfter = false)
+    }
+
+    private fun setControlsCollapsed(collapsed: Boolean) {
+        controlsCollapsed = collapsed
+        controlPanelBody.visibility = if (collapsed) View.GONE else View.VISIBLE
+        panelToggle.text = if (collapsed) "⌃" else "⌄"
+        panelToggle.contentDescription = if (collapsed) "Abrir controles" else "Recolher controles"
+    }
+
+    private fun showNavigationInstruction(arrow: String, primary: String, secondary: String) {
+        navigationInstructionPanel.visibility = View.VISIBLE
+        navigationArrow.text = arrow
+        navigationPrimaryText.text = primary
+        navigationSecondaryText.text = secondary
+    }
+
+    private fun hideNavigationInstruction() {
+        navigationInstructionPanel.visibility = View.GONE
     }
 
     private fun loadVectorMapStyle(mapLibreMap: MapLibreMap) {
@@ -239,11 +276,7 @@ class MainActivity : AppCompatActivity() {
         lastSavedRoute?.let(::drawSavedRoute)
         currentLocation?.let { renderLiveLocation(it, forceFollow = !centeredOnUserOnce) }
         if (!recordingUiActive && localNavigationRoute == null) {
-            statusText.text = if (vectorStyleLoaded) {
-                "Mapa vetorial e GPS prontos"
-            } else {
-                "Mapa e GPS prontos"
-            }
+            statusText.text = if (vectorStyleLoaded) "Mapa vetorial e GPS prontos" else "Mapa e GPS prontos"
         }
     }
 
@@ -267,14 +300,17 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        ViewCompat.setOnApplyWindowInsetsListener(centerLocationButton) { view, insets ->
+        val topInsetListener = ViewCompat.OnApplyWindowInsetsListener { view, insets ->
             val status = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             view.translationY = status.top.toFloat()
             insets
         }
+        ViewCompat.setOnApplyWindowInsetsListener(centerLocationButton, topInsetListener)
+        ViewCompat.setOnApplyWindowInsetsListener(navigationInstructionPanel, topInsetListener)
 
         ViewCompat.requestApplyInsets(panel)
         ViewCompat.requestApplyInsets(centerLocationButton)
+        ViewCompat.requestApplyInsets(navigationInstructionPanel)
     }
 
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).roundToInt()
@@ -290,11 +326,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
-        if (hasLocationPermission()) {
-            startRecordingNow()
-        } else {
-            requestLocationPermission(startRecordingAfter = true)
-        }
+        if (hasLocationPermission()) startRecordingNow()
+        else requestLocationPermission(startRecordingAfter = true)
     }
 
     private fun startRecordingNow() {
@@ -332,16 +365,10 @@ class MainActivity : AppCompatActivity() {
             if (latLngs.size >= 2 && mapStyleReady) {
                 if (recordedOutline == null) {
                     recordedOutline = map?.addPolyline(
-                        PolylineOptions()
-                            .addAll(latLngs)
-                            .width(12f)
-                            .color(Color.rgb(14, 50, 76))
+                        PolylineOptions().addAll(latLngs).width(12f).color(Color.rgb(14, 50, 76))
                     )
                     recordedPolyline = map?.addPolyline(
-                        PolylineOptions()
-                            .addAll(latLngs)
-                            .width(7f)
-                            .color(Color.rgb(0, 190, 140))
+                        PolylineOptions().addAll(latLngs).width(7f).color(Color.rgb(0, 190, 140))
                     )
                 } else {
                     recordedOutline?.points = latLngs
@@ -349,10 +376,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            snapshot.points.lastOrNull()?.let { point ->
-                val serviceLocation = toLocation(point)
-                renderLiveLocation(serviceLocation, forceFollow = true)
-            }
+            snapshot.points.lastOrNull()?.let { renderLiveLocation(toLocation(it), forceFollow = true) }
 
             statusText.text = String.format(
                 Locale.getDefault(),
@@ -459,7 +483,12 @@ class MainActivity : AppCompatActivity() {
         lastSpokenTurnIndex = -1
         offRouteAnnounced = false
         centeredOnUserOnce = true
+        streetNameCache.clear()
+        pendingStreetLookupIndex = null
         navigateButton.text = "ENCERRAR NAVEGAÇÃO"
+        setControlsCollapsed(true)
+        showNavigationInstruction("↑", "Navegação iniciada", "Aguardando próxima instrução")
+        speak("Navegação iniciada")
 
         currentLocation?.let {
             centerMapOn(it, driving = true, immediate = false)
@@ -473,8 +502,14 @@ class MainActivity : AppCompatActivity() {
         localNavigationRoute = null
         lastSpokenTurnIndex = -1
         offRouteAnnounced = false
+        streetNameCache.clear()
+        pendingStreetLookupIndex = null
         navigateButton.text = "NAVEGAR NA ROTA SELECIONADA"
-        if (updateStatus) statusText.text = "Navegação encerrada"
+        hideNavigationInstruction()
+        if (updateStatus) {
+            statusText.text = "Navegação encerrada"
+            setControlsCollapsed(false)
+        }
     }
 
     private fun updateLocalNavigation(location: Location) {
@@ -490,11 +525,14 @@ class MainActivity : AppCompatActivity() {
             speak("Você chegou ao destino")
             stopLocalNavigation(updateStatus = false)
             statusText.text = "Destino alcançado • ${route.name}"
+            showNavigationInstruction("✓", "Destino alcançado", route.name)
+            mapView.postDelayed({ hideNavigationInstruction() }, 4_000L)
             return
         }
 
         if (deviation > OFF_ROUTE_DISTANCE_METERS) {
             statusText.text = "Fora da rota • ${formatDistance(deviation)} do trajeto"
+            showNavigationInstruction("↶", "Fora da rota", "Retorne ao trajeto marcado")
             if (!offRouteAnnounced) {
                 speak("Você saiu da rota. Retorne ao trajeto marcado.")
                 offRouteAnnounced = true
@@ -507,14 +545,51 @@ class MainActivity : AppCompatActivity() {
         if (nextTurnIndex != null) {
             val turnDistance = location.distanceTo(toLocation(points[nextTurnIndex]))
             val direction = turnDirection(points, nextTurnIndex)
+            val arrow = if (direction == "direita") "↱" else "↰"
+            val street = streetNameCache[nextTurnIndex] ?: "Próxima conversão"
+
             statusText.text = "Navegando • ${formatDistance(turnDistance)} • vire à $direction"
+            showNavigationInstruction(
+                arrow,
+                "${formatDistance(turnDistance)} • Vire à $direction",
+                street
+            )
+            requestStreetName(nextTurnIndex, points[nextTurnIndex])
 
             if (turnDistance <= TURN_VOICE_DISTANCE_METERS && nextTurnIndex != lastSpokenTurnIndex) {
-                speak("Em ${spokenDistance(turnDistance)}, vire à $direction")
+                val spokenStreet = streetNameCache[nextTurnIndex]?.let { " na $it" }.orEmpty()
+                speak("Em ${spokenDistance(turnDistance)}, vire à $direction$spokenStreet")
                 lastSpokenTurnIndex = nextTurnIndex
             }
         } else {
             statusText.text = "Navegando • siga em frente • ${formatDistance(destinationDistance)} até o destino"
+            showNavigationInstruction(
+                "↑",
+                "Siga em frente",
+                "${formatDistance(destinationDistance)} até o destino"
+            )
+        }
+    }
+
+    private fun requestStreetName(index: Int, point: RoutePoint) {
+        if (streetNameCache.containsKey(index) || pendingStreetLookupIndex == index) return
+        pendingStreetLookupIndex = index
+        streetLookupExecutor.execute {
+            val street = runCatching {
+                val geocoder = Geocoder(this, Locale("pt", "BR"))
+                @Suppress("DEPRECATION")
+                val address = geocoder.getFromLocation(point.latitude, point.longitude, 1)?.firstOrNull()
+                address?.thoroughfare ?: address?.featureName ?: address?.subLocality
+            }.getOrNull()
+
+            runOnUiThread {
+                pendingStreetLookupIndex = null
+                if (!street.isNullOrBlank()) {
+                    streetNameCache[index] = street
+                    val current = currentLocation
+                    if (current != null && localNavigationRoute != null) updateLocalNavigation(current)
+                }
+            }
         }
     }
 
@@ -559,27 +634,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun readRouteImage(uri: Uri) {
-        statusText.text = "Lendo ruas e referências da imagem..."
-        imageImporter.readStreetCandidates(
+        statusText.text = "Analisando o print da rota..."
+        imageImporter.scanRouteImage(
             uri = uri,
-            onSuccess = { candidates ->
+            onSuccess = { scan ->
                 runOnUiThread {
-                    if (candidates.isEmpty()) {
+                    if (scan.references.isEmpty()) {
                         statusText.text = "Não encontrei nomes de ruas úteis nessa imagem"
-                    } else {
-                        AlertDialog.Builder(this)
-                            .setTitle("Referências encontradas")
-                            .setMessage(
-                                candidates.take(16).joinToString("\n") +
-                                    "\n\nVou cruzar estes nomes com sua região atual e montar uma rota para conferir."
-                            )
-                            .setNegativeButton("Cancelar", null)
-                            .setPositiveButton("Montar rota") { _, _ ->
-                                geocodeImportedRoute(candidates)
-                            }
-                            .show()
-                        statusText.text = "Imagem lida • ${candidates.size} referências"
+                        toast("Tente um print com os nomes das ruas visíveis.")
+                        return@runOnUiThread
                     }
+
+                    val traceMessage = if (scan.visualTrace.isNotEmpty()) {
+                        "Também detectei a linha colorida do trajeto."
+                    } else {
+                        "Não consegui isolar a linha da rota; vou usar as ruas reconhecidas."
+                    }
+                    val labels = scan.references.take(14).joinToString("\n") { "• ${it.label}" }
+                    AlertDialog.Builder(this)
+                        .setTitle("Rota encontrada no print")
+                        .setMessage("$labels\n\n$traceMessage\nVou reconstruir a rota e mostrar uma prévia para você conferir.")
+                        .setNegativeButton("Cancelar", null)
+                        .setPositiveButton("Montar rota") { _, _ -> geocodeImportedRoute(scan) }
+                        .show()
+                    statusText.text = "Print lido • ${scan.references.size} referências"
                 }
             },
             onError = {
@@ -590,20 +668,21 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun geocodeImportedRoute(candidates: List<String>) {
-        statusText.text = "Localizando as ruas da imagem..."
+    private fun geocodeImportedRoute(scan: ImageRouteImporter.ScanResult) {
+        statusText.text = "Localizando as ruas e reconstruindo a rota..."
         resolveLocationBias { bias ->
             imageImporter.geocodeCandidates(
-                candidates = candidates,
+                candidates = scan.references,
                 biasLatitude = bias?.latitude,
                 biasLongitude = bias?.longitude,
                 onSuccess = { streets ->
+                    val reconstructed = imageImporter.reconstructRoute(scan, streets)
                     runOnUiThread {
-                        if (streets.size < 2) {
-                            statusText.text = "A imagem não trouxe ruas suficientes para montar uma rota"
-                            toast("Tente um print com nomes de ruas mais legíveis.")
+                        if (reconstructed.points.size < 2) {
+                            statusText.text = "O print não trouxe dados suficientes para montar uma rota"
+                            toast("Tente um print maior, com mais nomes de ruas e a linha do percurso visível.")
                         } else {
-                            showImportedRoutePreview(streets)
+                            showImportedRoutePreview(streets, reconstructed)
                         }
                     }
                 },
@@ -617,12 +696,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showImportedRoutePreview(streets: List<ImageRouteImporter.GeocodedStreet>) {
+    private fun showImportedRoutePreview(
+        streets: List<ImageRouteImporter.GeocodedStreet>,
+        reconstructed: ImageRouteImporter.ReconstructedRoute
+    ) {
         val now = System.currentTimeMillis()
-        val points = streets.mapIndexed { index, street ->
+        val points = reconstructed.points.mapIndexed { index, point ->
             RoutePoint(
-                latitude = street.latitude,
-                longitude = street.longitude,
+                latitude = point.latitude,
+                longitude = point.longitude,
                 timestamp = now + index,
                 accuracy = 0f,
                 speed = 0f,
@@ -641,11 +723,16 @@ class MainActivity : AppCompatActivity() {
         )
 
         drawSavedRoute(temporary)
-        val labels = streets.joinToString("\n") { "• ${it.label}" }
+        val method = if (reconstructed.usedVisualTrace) {
+            "Linha visual + nomes das ruas"
+        } else {
+            "Nomes das ruas"
+        }
+        val labels = streets.take(10).joinToString("\n") { "• ${it.label}" }
         AlertDialog.Builder(this)
             .setTitle("Prévia da rota importada")
             .setMessage(
-                "$labels\n\nConfira o desenho no mapa. Essa é uma reconstrução baseada nos nomes detectados no print."
+                "$labels\n\nMétodo: $method\nConfiança estimada: ${reconstructed.confidence}%\n\nConfira o desenho no mapa antes de salvar."
             )
             .setNegativeButton("Descartar") { _, _ ->
                 lastSavedRoute?.let(::drawSavedRoute) ?: removeSavedRouteFromMap()
@@ -654,7 +741,7 @@ class MainActivity : AppCompatActivity() {
                 askRouteNameAndSave(temporary, "Ex.: Linha 203 - print da internet")
             }
             .show()
-        statusText.text = "Prévia montada • ${streets.size} pontos geográficos"
+        statusText.text = "Prévia montada • ${points.size} pontos • ${reconstructed.confidence}%"
     }
 
     @SuppressLint("MissingPermission")
@@ -703,16 +790,10 @@ class MainActivity : AppCompatActivity() {
 
         if (points.size >= 2) {
             savedRouteOutline = map?.addPolyline(
-                PolylineOptions()
-                    .addAll(points)
-                    .width(14f)
-                    .color(Color.rgb(20, 45, 72))
+                PolylineOptions().addAll(points).width(14f).color(Color.rgb(20, 45, 72))
             )
             savedRoutePolyline = map?.addPolyline(
-                PolylineOptions()
-                    .addAll(points)
-                    .width(8f)
-                    .color(Color.rgb(20, 115, 230))
+                PolylineOptions().addAll(points).width(8f).color(Color.rgb(20, 115, 230))
             )
             runCatching {
                 val bounds = LatLngBounds.fromLatLngs(points)
@@ -761,9 +842,7 @@ class MainActivity : AppCompatActivity() {
         val marker = locationMarker
         if (marker == null) {
             locationMarker = currentMap.addMarker(
-                MarkerOptions()
-                    .position(latLng)
-                    .title("Você está aqui")
+                MarkerOptions().position(latLng).title("Você está aqui")
             )
         } else {
             marker.position = latLng
@@ -809,11 +888,8 @@ class MainActivity : AppCompatActivity() {
                 .bearing(bearing)
                 .tilt(if (localNavigationRoute != null) 48.0 else 28.0)
                 .build()
-            if (immediate) {
-                currentMap.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
-            } else {
-                currentMap.animateCamera(CameraUpdateFactory.newCameraPosition(camera), CAMERA_ANIMATION_MS)
-            }
+            if (immediate) currentMap.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
+            else currentMap.animateCamera(CameraUpdateFactory.newCameraPosition(camera), CAMERA_ANIMATION_MS)
         } else {
             val update = CameraUpdateFactory.newLatLngZoom(target, IDLE_ZOOM)
             if (immediate) currentMap.moveCamera(update)
@@ -903,6 +979,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         stopLiveLocationUpdates()
         imageImporter.close()
+        streetLookupExecutor.shutdownNow()
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         mapView.onDestroy()
@@ -927,7 +1004,7 @@ class MainActivity : AppCompatActivity() {
 
         private const val LOCAL_TURN_DEGREES = 42f
         private const val MIN_TURN_LOOKAHEAD_METERS = 25f
-        private const val TURN_VOICE_DISTANCE_METERS = 120f
+        private const val TURN_VOICE_DISTANCE_METERS = 180f
         private const val OFF_ROUTE_DISTANCE_METERS = 80f
         private const val DESTINATION_RADIUS_METERS = 35f
         private const val MIN_EXTRA_BOTTOM_DP = 10
