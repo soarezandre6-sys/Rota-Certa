@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: rota-certa-debug-${{ github.ref }}
+  group: rota-certa-build5-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
