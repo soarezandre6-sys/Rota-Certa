@@ -292,9 +292,9 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
     }
 
-    override fun onLowMemory() {
-        super.onLowMemory()
-        navView.onLowMemory()
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        navView.onTrimMemory(level)
     }
 
     override fun onDestroy() {
