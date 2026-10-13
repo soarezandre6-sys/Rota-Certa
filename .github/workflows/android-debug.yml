@@ -5,6 +5,10 @@ on:
     branches: [build-1-rota-certa]
   workflow_dispatch:
 
+concurrency:
+  group: rota-certa-debug-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +26,11 @@ jobs:
         with:
           gradle-version: '9.6.0'
       - name: Build debug APK
-        run: gradle :app:assembleDebug -PMAPS_API_KEY=CI_PLACEHOLDER --stacktrace
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          KEY="${MAPS_API_KEY:-CI_PLACEHOLDER}"
+          gradle :app:assembleDebug -PMAPS_API_KEY="$KEY" --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: rota-certa-build-1-debug
