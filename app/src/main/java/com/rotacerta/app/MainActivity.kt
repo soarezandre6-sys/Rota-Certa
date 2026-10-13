@@ -27,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.OnApplyWindowInsetsListener
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
@@ -300,7 +301,7 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        val topInsetListener = ViewCompat.OnApplyWindowInsetsListener { view, insets ->
+        val topInsetListener = OnApplyWindowInsetsListener { view, insets ->
             val status = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             view.translationY = status.top.toFloat()
             insets
@@ -723,11 +724,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         drawSavedRoute(temporary)
-        val method = if (reconstructed.usedVisualTrace) {
-            "Linha visual + nomes das ruas"
-        } else {
-            "Nomes das ruas"
-        }
+        val method = if (reconstructed.usedVisualTrace) "Linha visual + nomes das ruas" else "Nomes das ruas"
         val labels = streets.take(10).joinToString("\n") { "• ${it.label}" }
         AlertDialog.Builder(this)
             .setTitle("Prévia da rota importada")
