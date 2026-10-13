@@ -188,6 +188,17 @@
                 android:textStyle="bold"
                 app:backgroundTint="#0D47A1"
                 app:cornerRadius="14dp" />
+
+            <com.rotacerta.app.ui.ClearRouteButton
+                android:id="@+id/clear_route_button"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="6dp"
+                android:text="REMOVER ROTA DO MAPA"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                app:backgroundTint="#455A64"
+                app:cornerRadius="14dp" />
         </LinearLayout>
     </LinearLayout>
 
