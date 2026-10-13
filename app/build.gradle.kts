@@ -14,8 +14,8 @@ android {
         applicationId = "com.rotacerta.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.5.0-build5"
+        versionCode = 6
+        versionName = "0.6.0-build6"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         buildConfigField("boolean", "GOOGLE_NAV_CONFIGURED", googleNavConfigured.toString())
     }
