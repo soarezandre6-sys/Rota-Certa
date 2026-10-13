@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     private var map: GoogleMap? = null
     private var recordedPolyline: Polyline? = null
+    private var savedRoutePolyline: Polyline? = null
     private var navigator: Navigator? = null
     private var arrivalListener: Navigator.ArrivalListener? = null
     private var startedAt: Long = 0L
@@ -82,6 +83,7 @@ class MainActivity : AppCompatActivity() {
 
         startButton.setOnClickListener { startRecording() }
         stopButton.setOnClickListener { stopAndNameRoute() }
+        findViewById<Button>(R.id.saved_routes_button).setOnClickListener { showSavedRoutes() }
         findViewById<Button>(R.id.import_image_button).setOnClickListener {
             imagePicker.launch("image/*")
         }
@@ -186,14 +188,38 @@ class MainActivity : AppCompatActivity() {
                 )
                 routeStore.save(route)
                 lastSavedRoute = route
+                drawSavedRoute(route)
                 statusText.text = "${route.name} salva • ${"%.2f".format(route.distanceMeters / 1000f)} km"
             }
             .show()
     }
 
+    private fun showSavedRoutes() {
+        val routes = routeStore.loadAll().sortedByDescending { it.finishedAt }
+        if (routes.isEmpty()) {
+            toast("Ainda não há rotas salvas.")
+            return
+        }
+
+        val labels = routes.map { route ->
+            "${route.name} • ${"%.2f".format(route.distanceMeters / 1000f)} km"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Rotas salvas")
+            .setItems(labels) { _, which ->
+                val selected = routes[which]
+                lastSavedRoute = selected
+                drawSavedRoute(selected)
+                statusText.text = "Rota selecionada: ${selected.name}"
+            }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
     private fun navigateLastSavedRoute() {
         val route = lastSavedRoute ?: run {
-            toast("Ainda não há rota salva.")
+            toast("Selecione ou grave uma rota primeiro.")
             return
         }
         val nav = navigator ?: run {
@@ -267,8 +293,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun drawSavedRoute(route: RecordedRoute) {
         val points = route.points.map { LatLng(it.latitude, it.longitude) }
+        savedRoutePolyline?.remove()
         if (points.size >= 2) {
-            map?.addPolyline(PolylineOptions().addAll(points).width(10f))
+            savedRoutePolyline = map?.addPolyline(PolylineOptions().addAll(points).width(10f))
         }
     }
 
