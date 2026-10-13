@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -25,10 +24,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
         isCoreLibraryDesugaringEnabled = true
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
 dependencies {
@@ -40,8 +35,4 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("org.jetbrains.kotlin:kotlin-reflect:2.3.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
-}
-
-configurations.configureEach {
-    exclude(group = "com.google.android.gms", module = "play-services-maps")
 }
