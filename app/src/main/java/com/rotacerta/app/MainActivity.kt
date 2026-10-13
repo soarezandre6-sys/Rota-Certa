@@ -9,8 +9,6 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.location.Location
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -35,9 +33,6 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import com.google.android.libraries.navigation.NavigationApi
-import com.google.android.libraries.navigation.Navigator
-import com.google.android.libraries.navigation.Waypoint
 import com.rotacerta.app.data.RouteStore
 import com.rotacerta.app.importer.ImageRouteImporter
 import com.rotacerta.app.location.RouteRecordingService
@@ -57,9 +52,11 @@ import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
+
     private lateinit var mapView: MapView
     private lateinit var statusText: TextView
     private lateinit var startButton: Button
@@ -75,25 +72,28 @@ class MainActivity : AppCompatActivity() {
 
     private var map: MapLibreMap? = null
     private var mapStyleReady = false
+    private var vectorStyleLoaded = false
+
+    private var recordedOutline: Polyline? = null
     private var recordedPolyline: Polyline? = null
+    private var savedRouteOutline: Polyline? = null
     private var savedRoutePolyline: Polyline? = null
     private var locationMarker: Marker? = null
+
     private var currentLocation: Location? = null
     private var liveLocationUpdatesActive = false
     private var centeredOnUserOnce = false
+    private var lastCameraFollowAt = 0L
 
-    private var navigator: Navigator? = null
-    private var arrivalListener: Navigator.ArrivalListener? = null
     private var lastSavedRoute: RecordedRoute? = null
-
     private var localNavigationRoute: RecordedRoute? = null
     private var lastSpokenTurnIndex = -1
     private var offRouteAnnounced = false
+
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
 
     private var recordingService: RouteRecordingService? = null
-    private var recordingServiceBound = false
     private var bindRequested = false
     private var pendingStartRecording = false
     private var recordingUiActive = false
@@ -101,7 +101,7 @@ class MainActivity : AppCompatActivity() {
 
     private val liveLocationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            result.lastLocation?.let(::renderLiveLocation)
+            result.lastLocation?.let { renderLiveLocation(it, forceFollow = false) }
         }
     }
 
@@ -115,14 +115,12 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val serviceBinder = binder as? RouteRecordingService.LocalBinder ?: return
             recordingService = serviceBinder.getService()
-            recordingServiceBound = true
             recordingService?.setListener(recordingListener)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             recordingService?.setListener(null)
             recordingService = null
-            recordingServiceBound = false
         }
     }
 
@@ -145,7 +143,7 @@ class MainActivity : AppCompatActivity() {
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* A gravação continua se o usuário recusar a notificação. */ }
+    ) { }
 
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let(::readRouteImage)
@@ -180,18 +178,9 @@ class MainActivity : AppCompatActivity() {
         mapView.getMapAsync { mapLibreMap ->
             map = mapLibreMap
             mapLibreMap.uiSettings.isCompassEnabled = true
-            mapLibreMap.setStyle(Style.Builder().fromJson(OSM_STYLE_JSON)) {
-                mapStyleReady = true
-                lastSavedRoute?.let(::drawSavedRoute)
-                currentLocation?.let(::renderLiveLocation)
-                if (!recordingUiActive && localNavigationRoute == null) {
-                    statusText.text = "Mapa e GPS prontos"
-                }
-            }
-        }
-
-        if (BuildConfig.GOOGLE_NAV_CONFIGURED) {
-            initializeGoogleNavigation()
+            mapLibreMap.uiSettings.isAttributionEnabled = true
+            mapLibreMap.uiSettings.isLogoEnabled = true
+            loadVectorMapStyle(mapLibreMap)
         }
 
         startButton.setOnClickListener { startRecording() }
@@ -202,15 +191,19 @@ class MainActivity : AppCompatActivity() {
         }
         navigateButton.setOnClickListener {
             if (localNavigationRoute != null) {
-                stopNavigation()
+                stopLocalNavigation(updateStatus = true)
             } else {
                 lastSavedRoute?.let(::navigateRoute) ?: toast("Selecione ou grave uma rota primeiro.")
             }
         }
         centerLocationButton.setOnClickListener {
             val location = currentLocation
-            if (location != null) centerMapOn(location, navigating = localNavigationRoute != null)
-            else toast("Aguardando uma posição GPS válida.")
+            if (location != null) {
+                centeredOnUserOnce = true
+                centerMapOn(location, driving = recordingUiActive || localNavigationRoute != null, immediate = false)
+            } else {
+                toast("Aguardando uma posição GPS válida.")
+            }
         }
 
         if (hasLocationPermission()) {
@@ -220,18 +213,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun loadVectorMapStyle(mapLibreMap: MapLibreMap) {
+        mapStyleReady = false
+        vectorStyleLoaded = false
+        mapLibreMap.setStyle(Style.Builder().fromUri(OPENFREE_STYLE_URI)) {
+            vectorStyleLoaded = true
+            onMapStyleReady()
+        }
+
+        mapView.postDelayed({
+            if (!vectorStyleLoaded && !isFinishing && map === mapLibreMap) {
+                mapLibreMap.setStyle(Style.Builder().fromJson(OSM_FALLBACK_STYLE_JSON)) {
+                    onMapStyleReady()
+                    if (!recordingUiActive && localNavigationRoute == null) {
+                        statusText.text = "Mapa básico carregado • GPS pronto"
+                    }
+                }
+            }
+        }, STYLE_FALLBACK_DELAY_MS)
+    }
+
+    private fun onMapStyleReady() {
+        mapStyleReady = true
+        clearAnnotationReferences()
+        lastSavedRoute?.let(::drawSavedRoute)
+        currentLocation?.let { renderLiveLocation(it, forceFollow = !centeredOnUserOnce) }
+        if (!recordingUiActive && localNavigationRoute == null) {
+            statusText.text = if (vectorStyleLoaded) {
+                "Mapa vetorial e GPS prontos"
+            } else {
+                "Mapa e GPS prontos"
+            }
+        }
+    }
+
+    private fun clearAnnotationReferences() {
+        recordedOutline = null
+        recordedPolyline = null
+        savedRouteOutline = null
+        savedRoutePolyline = null
+        locationMarker = null
+    }
+
     private fun applySystemBarInsets() {
         val panel = findViewById<View>(R.id.control_panel)
         val baseBottomPadding = panel.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(panel) { view, insets ->
-            val navigation = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            view.updatePadding(bottom = baseBottomPadding + navigation.bottom)
+            val nav = insets.getInsets(
+                WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.systemGestures()
+            )
+            val safeBottom = max(nav.bottom, dpToPx(MIN_EXTRA_BOTTOM_DP))
+            view.updatePadding(bottom = baseBottomPadding + safeBottom)
             insets
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(centerLocationButton) { view, insets ->
-            val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
-            view.translationY = statusBars.top.toFloat()
+            val status = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            view.translationY = status.top.toFloat()
             insets
         }
 
@@ -239,40 +277,7 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.requestApplyInsets(centerLocationButton)
     }
 
-    private fun initializeGoogleNavigation() {
-        NavigationApi.getNavigator(
-            this,
-            object : NavigationApi.NavigatorListener {
-                override fun onNavigatorReady(readyNavigator: Navigator) {
-                    navigator = readyNavigator
-                    registerArrivalListener(readyNavigator)
-                }
-
-                override fun onError(errorCode: Int) {
-                    // O mapa e o modo de seguir a rota continuam funcionando sem o SDK Google.
-                    if (localNavigationRoute == null && !recordingUiActive) {
-                        statusText.text = "Mapa/GPS prontos • navegação Google indisponível ($errorCode)"
-                    }
-                }
-            }
-        )
-    }
-
-    private fun registerArrivalListener(nav: Navigator) {
-        arrivalListener?.let(nav::removeArrivalListener)
-        arrivalListener = Navigator.ArrivalListener { event ->
-            if (event.isFinalDestination) {
-                nav.stopGuidance()
-                stopLocalNavigation(updateStatus = false)
-                statusText.text = "Destino final alcançado"
-                speak("Você chegou ao destino")
-            } else {
-                nav.continueToNextDestination()
-                nav.startGuidance()
-            }
-        }
-        arrivalListener?.let(nav::addArrivalListener)
-    }
+    private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).roundToInt()
 
     private fun requestLocationPermission(startRecordingAfter: Boolean) {
         startRecordingAfterPermission = startRecordingAfter
@@ -293,12 +298,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecordingNow() {
-        if (localNavigationRoute != null) stopNavigation()
+        stopLocalNavigation(updateStatus = false)
         maybeRequestNotificationPermission()
         pendingStartRecording = true
         recordingUiActive = true
+        centeredOnUserOnce = true
+
+        recordedOutline?.let { map?.removeAnnotation(it) }
         recordedPolyline?.let { map?.removeAnnotation(it) }
+        recordedOutline = null
         recordedPolyline = null
+
         startButton.isEnabled = false
         stopButton.isEnabled = true
         statusText.text = "Ativando GPS e iniciando gravação..."
@@ -320,16 +330,28 @@ class MainActivity : AppCompatActivity() {
 
             val latLngs = snapshot.points.map { LatLng(it.latitude, it.longitude) }
             if (latLngs.size >= 2 && mapStyleReady) {
-                if (recordedPolyline == null) {
+                if (recordedOutline == null) {
+                    recordedOutline = map?.addPolyline(
+                        PolylineOptions()
+                            .addAll(latLngs)
+                            .width(12f)
+                            .color(Color.rgb(14, 50, 76))
+                    )
                     recordedPolyline = map?.addPolyline(
                         PolylineOptions()
                             .addAll(latLngs)
-                            .width(8f)
-                            .color(Color.rgb(30, 136, 229))
+                            .width(7f)
+                            .color(Color.rgb(0, 190, 140))
                     )
                 } else {
+                    recordedOutline?.points = latLngs
                     recordedPolyline?.points = latLngs
                 }
+            }
+
+            snapshot.points.lastOrNull()?.let { point ->
+                val serviceLocation = toLocation(point)
+                renderLiveLocation(serviceLocation, forceFollow = true)
             }
 
             statusText.text = String.format(
@@ -352,13 +374,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val final = service.stopRecording()
+        val finalSnapshot = service.stopRecording()
         pendingStartRecording = false
         recordingUiActive = false
         startButton.isEnabled = true
         stopButton.isEnabled = false
 
-        if (final.points.size < 2) {
+        if (finalSnapshot.points.size < 2) {
             statusText.text = "Rota curta demais para salvar"
             return
         }
@@ -366,10 +388,10 @@ class MainActivity : AppCompatActivity() {
         val route = RecordedRoute(
             id = System.currentTimeMillis(),
             name = "",
-            startedAt = final.startedAt,
+            startedAt = finalSnapshot.startedAt,
             finishedAt = System.currentTimeMillis(),
-            distanceMeters = final.distanceMeters,
-            points = final.points
+            distanceMeters = finalSnapshot.distanceMeters,
+            points = finalSnapshot.points
         )
         askRouteNameAndSave(route, "Ex.: Linha 203 Centro - Terminal")
     }
@@ -436,47 +458,15 @@ class MainActivity : AppCompatActivity() {
         localNavigationRoute = route
         lastSpokenTurnIndex = -1
         offRouteAnnounced = false
+        centeredOnUserOnce = true
         navigateButton.text = "ENCERRAR NAVEGAÇÃO"
-        currentLocation?.let(::updateLocalNavigation)
-        if (currentLocation == null) statusText.text = "Navegação iniciada • aguardando GPS..."
 
-        if (BuildConfig.GOOGLE_NAV_CONFIGURED && isOnline()) {
-            startGoogleGuidance(route)
-        } else {
-            statusText.text = "Navegando pela rota gravada • GPS em tempo real"
+        currentLocation?.let {
+            centerMapOn(it, driving = true, immediate = false)
+            updateLocalNavigation(it)
+        } ?: run {
+            statusText.text = "Navegação iniciada • aguardando GPS..."
         }
-    }
-
-    private fun startGoogleGuidance(route: RecordedRoute) {
-        val nav = navigator ?: return
-        val sampled = selectNavigationPoints(route.points, MAX_NAVIGATION_WAYPOINTS)
-        val waypoints = sampled.mapIndexed { index, point ->
-            Waypoint.builder()
-                .setLatLng(point.latitude, point.longitude)
-                .setTitle(if (index == sampled.lastIndex) route.name else "Trecho ${index + 1}")
-                .setVehicleStopover(index == sampled.lastIndex)
-                .build()
-        }
-
-        nav.setDestinations(waypoints)?.setOnResultListener { code ->
-            when (code) {
-                Navigator.RouteStatus.OK -> {
-                    nav.setAudioGuidance(Navigator.AudioGuidance.VOICE_ALERTS_AND_GUIDANCE)
-                    runCatching { nav.setHeadsUpNotificationEnabled(true) }
-                    nav.startGuidance()
-                }
-                Navigator.RouteStatus.NETWORK_ERROR -> statusText.text = "Navegação local ativa • Google sem rede"
-                Navigator.RouteStatus.ROUTING_TIMEOUT -> statusText.text = "Navegação local ativa • Google demorou para calcular"
-                Navigator.RouteStatus.WAYPOINT_ERROR -> statusText.text = "Navegação local ativa • ponto Google inválido"
-                Navigator.RouteStatus.NO_ROUTE_FOUND -> statusText.text = "Navegação local ativa • Google não achou a via"
-                else -> statusText.text = "Navegação local ativa • Google indisponível ($code)"
-            }
-        }
-    }
-
-    private fun stopNavigation() {
-        runCatching { navigator?.stopGuidance() }
-        stopLocalNavigation(updateStatus = true)
     }
 
     private fun stopLocalNavigation(updateStatus: Boolean) {
@@ -493,20 +483,18 @@ class MainActivity : AppCompatActivity() {
         if (points.size < 2) return
 
         val nearestIndex = nearestRouteIndex(location, points)
-        val nearestPoint = toLocation(points[nearestIndex])
-        val deviation = location.distanceTo(nearestPoint)
+        val deviation = location.distanceTo(toLocation(points[nearestIndex]))
         val destinationDistance = location.distanceTo(toLocation(points.last()))
 
         if (destinationDistance <= DESTINATION_RADIUS_METERS) {
             speak("Você chegou ao destino")
-            runCatching { navigator?.stopGuidance() }
             stopLocalNavigation(updateStatus = false)
             statusText.text = "Destino alcançado • ${route.name}"
             return
         }
 
         if (deviation > OFF_ROUTE_DISTANCE_METERS) {
-            statusText.text = "Fora da rota • aprox. ${formatDistance(deviation)} do trajeto"
+            statusText.text = "Fora da rota • ${formatDistance(deviation)} do trajeto"
             if (!offRouteAnnounced) {
                 speak("Você saiu da rota. Retorne ao trajeto marcado.")
                 offRouteAnnounced = true
@@ -564,50 +552,6 @@ class MainActivity : AppCompatActivity() {
         return if (delta >= 0f) "direita" else "esquerda"
     }
 
-    private fun selectNavigationPoints(points: List<RoutePoint>, maxWaypoints: Int): List<RoutePoint> {
-        if (points.size <= 2) return points
-
-        val cleaned = mutableListOf(points.first())
-        points.drop(1).forEach { point ->
-            val previous = cleaned.last()
-            if (distanceMeters(previous, point) >= MIN_WAYPOINT_SPACING_METERS) cleaned += point
-        }
-        if (cleaned.last() != points.last()) cleaned += points.last()
-        if (cleaned.size <= maxWaypoints) return cleaned
-
-        val selected = linkedSetOf(0, cleaned.lastIndex)
-        val turns = (1 until cleaned.lastIndex)
-            .map { index -> index to turnAngle(cleaned[index - 1], cleaned[index], cleaned[index + 1]) }
-            .filter { (_, angle) -> angle >= IMPORTANT_TURN_DEGREES }
-            .sortedByDescending { (_, angle) -> angle }
-
-        turns.take((maxWaypoints / 2).coerceAtLeast(1)).forEach { (index, _) ->
-            if (selected.size < maxWaypoints) selected += index
-        }
-
-        val cumulative = FloatArray(cleaned.size)
-        for (i in 1 until cleaned.size) {
-            cumulative[i] = cumulative[i - 1] + distanceMeters(cleaned[i - 1], cleaned[i])
-        }
-        val total = cumulative.last().coerceAtLeast(1f)
-
-        for (slot in 1 until maxWaypoints - 1) {
-            if (selected.size >= maxWaypoints) break
-            val target = total * slot / (maxWaypoints - 1f)
-            val nearest = cumulative.indices.minByOrNull { abs(cumulative[it] - target) } ?: continue
-            selected += nearest
-        }
-
-        if (selected.size < maxWaypoints) {
-            for (index in cleaned.indices) {
-                if (selected.size >= maxWaypoints) break
-                selected += index
-            }
-        }
-
-        return selected.sorted().map(cleaned::get)
-    }
-
     private fun turnAngle(a: RoutePoint, b: RoutePoint, c: RoutePoint): Float {
         val firstBearing = toLocation(a).bearingTo(toLocation(b))
         val secondBearing = toLocation(b).bearingTo(toLocation(c))
@@ -627,7 +571,7 @@ class MainActivity : AppCompatActivity() {
                             .setTitle("Referências encontradas")
                             .setMessage(
                                 candidates.take(16).joinToString("\n") +
-                                    "\n\nVou cruzar estes nomes com sua região atual e montar uma rota para você conferir."
+                                    "\n\nVou cruzar estes nomes com sua região atual e montar uma rota para conferir."
                             )
                             .setNegativeButton("Cancelar", null)
                             .setPositiveButton("Montar rota") { _, _ ->
@@ -639,7 +583,9 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             onError = {
-                runOnUiThread { statusText.text = "Falha ao ler a imagem: ${it.message ?: "erro desconhecido"}" }
+                runOnUiThread {
+                    statusText.text = "Falha ao ler a imagem: ${it.message ?: "erro desconhecido"}"
+                }
             }
         )
     }
@@ -655,7 +601,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         if (streets.size < 2) {
                             statusText.text = "A imagem não trouxe ruas suficientes para montar uma rota"
-                            toast("Tente um print com nomes de ruas mais legíveis e da mesma região em que você está.")
+                            toast("Tente um print com nomes de ruas mais legíveis.")
                         } else {
                             showImportedRoutePreview(streets)
                         }
@@ -684,6 +630,7 @@ class MainActivity : AppCompatActivity() {
                 altitude = null
             )
         }
+
         val temporary = RecordedRoute(
             id = now,
             name = "Rota importada",
@@ -698,10 +645,10 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Prévia da rota importada")
             .setMessage(
-                "$labels\n\nConfira o desenho no mapa. Como o print não contém coordenadas completas, esta é uma reconstrução baseada nos nomes de ruas detectados."
+                "$labels\n\nConfira o desenho no mapa. Essa é uma reconstrução baseada nos nomes detectados no print."
             )
             .setNegativeButton("Descartar") { _, _ ->
-                lastSavedRoute?.let(::drawSavedRoute) ?: savedRoutePolyline?.let { map?.removeAnnotation(it) }
+                lastSavedRoute?.let(::drawSavedRoute) ?: removeSavedRouteFromMap()
             }
             .setPositiveButton("Salvar rota") { _, _ ->
                 askRouteNameAndSave(temporary, "Ex.: Linha 203 - print da internet")
@@ -737,31 +684,48 @@ class MainActivity : AppCompatActivity() {
         return total
     }
 
-    private fun distanceMeters(a: RoutePoint, b: RoutePoint): Float = toLocation(a).distanceTo(toLocation(b))
+    private fun distanceMeters(a: RoutePoint, b: RoutePoint): Float =
+        toLocation(a).distanceTo(toLocation(b))
 
     private fun toLocation(point: RoutePoint): Location = Location("rota-certa").apply {
         latitude = point.latitude
         longitude = point.longitude
+        accuracy = point.accuracy
+        speed = point.speed
+        bearing = point.bearing
+        time = point.timestamp
     }
 
     private fun drawSavedRoute(route: RecordedRoute) {
         if (!mapStyleReady) return
         val points = route.points.map { LatLng(it.latitude, it.longitude) }
-        savedRoutePolyline?.let { map?.removeAnnotation(it) }
-        savedRoutePolyline = null
+        removeSavedRouteFromMap()
 
         if (points.size >= 2) {
+            savedRouteOutline = map?.addPolyline(
+                PolylineOptions()
+                    .addAll(points)
+                    .width(14f)
+                    .color(Color.rgb(20, 45, 72))
+            )
             savedRoutePolyline = map?.addPolyline(
                 PolylineOptions()
                     .addAll(points)
-                    .width(9f)
-                    .color(Color.rgb(99, 102, 241))
+                    .width(8f)
+                    .color(Color.rgb(20, 115, 230))
             )
             runCatching {
                 val bounds = LatLngBounds.fromLatLngs(points)
-                map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
+                map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 90))
             }
         }
+    }
+
+    private fun removeSavedRouteFromMap() {
+        savedRouteOutline?.let { map?.removeAnnotation(it) }
+        savedRoutePolyline?.let { map?.removeAnnotation(it) }
+        savedRouteOutline = null
+        savedRoutePolyline = null
     }
 
     @SuppressLint("MissingPermission")
@@ -769,14 +733,15 @@ class MainActivity : AppCompatActivity() {
         if (!hasLocationPermission() || liveLocationUpdatesActive) return
         liveLocationUpdatesActive = true
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000L)
-            .setMinUpdateIntervalMillis(500L)
-            .setMinUpdateDistanceMeters(1.5f)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, LOCATION_INTERVAL_MS)
+            .setMinUpdateIntervalMillis(LOCATION_FASTEST_INTERVAL_MS)
+            .setMinUpdateDistanceMeters(LOCATION_MIN_DISTANCE_METERS)
+            .setWaitForAccurateLocation(false)
             .build()
 
         fusedLocationClient.requestLocationUpdates(request, liveLocationCallback, Looper.getMainLooper())
         fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-            location?.let(::renderLiveLocation)
+            location?.let { renderLiveLocation(it, forceFollow = !centeredOnUserOnce) }
         }
     }
 
@@ -786,8 +751,8 @@ class MainActivity : AppCompatActivity() {
         liveLocationUpdatesActive = false
     }
 
-    private fun renderLiveLocation(location: Location) {
-        if (location.accuracy > 100f) return
+    private fun renderLiveLocation(location: Location, forceFollow: Boolean) {
+        if (location.accuracy > MAX_RENDER_ACCURACY_METERS) return
         currentLocation = location
         if (!mapStyleReady) return
 
@@ -804,28 +769,55 @@ class MainActivity : AppCompatActivity() {
             marker.position = latLng
         }
 
-        if (localNavigationRoute != null) {
-            centerMapOn(location, navigating = true)
-            updateLocalNavigation(location)
-        } else if (!centeredOnUserOnce) {
-            centerMapOn(location, navigating = false)
+        val shouldFollow = forceFollow || recordingUiActive || localNavigationRoute != null || !centeredOnUserOnce
+        if (shouldFollow) {
+            centerMapOn(
+                location = location,
+                driving = recordingUiActive || localNavigationRoute != null,
+                immediate = !centeredOnUserOnce
+            )
             centeredOnUserOnce = true
+        }
+
+        if (localNavigationRoute != null) {
+            updateLocalNavigation(location)
+        } else if (!recordingUiActive) {
+            statusText.text = String.format(
+                Locale.getDefault(),
+                "GPS ativo • precisão %.0f m",
+                location.accuracy
+            )
         }
     }
 
-    private fun centerMapOn(location: Location, navigating: Boolean) {
-        val target = LatLng(location.latitude, location.longitude)
+    private fun centerMapOn(location: Location, driving: Boolean, immediate: Boolean) {
         val currentMap = map ?: return
-        if (navigating) {
+        val now = System.currentTimeMillis()
+        if (!immediate && now - lastCameraFollowAt < CAMERA_MIN_INTERVAL_MS) return
+        lastCameraFollowAt = now
+
+        val target = LatLng(location.latitude, location.longitude)
+        if (driving) {
+            val bearing = if (location.hasBearing() && location.speed >= MIN_BEARING_SPEED_MPS) {
+                location.bearing.toDouble()
+            } else {
+                currentMap.cameraPosition.bearing
+            }
             val camera = CameraPosition.Builder()
                 .target(target)
-                .zoom(17.5)
-                .bearing(if (location.hasBearing()) location.bearing.toDouble() else currentMap.cameraPosition.bearing)
-                .tilt(45.0)
+                .zoom(if (localNavigationRoute != null) NAVIGATION_ZOOM else RECORDING_ZOOM)
+                .bearing(bearing)
+                .tilt(if (localNavigationRoute != null) 48.0 else 28.0)
                 .build()
-            currentMap.animateCamera(CameraUpdateFactory.newCameraPosition(camera))
+            if (immediate) {
+                currentMap.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
+            } else {
+                currentMap.animateCamera(CameraUpdateFactory.newCameraPosition(camera), CAMERA_ANIMATION_MS)
+            }
         } else {
-            currentMap.animateCamera(CameraUpdateFactory.newLatLngZoom(target, 17.0))
+            val update = CameraUpdateFactory.newLatLngZoom(target, IDLE_ZOOM)
+            if (immediate) currentMap.moveCamera(update)
+            else currentMap.animateCamera(update, CAMERA_ANIMATION_MS)
         }
     }
 
@@ -854,14 +846,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun isOnline(): Boolean {
-        val manager = getSystemService(ConnectivityManager::class.java)
-        val network = manager.activeNetwork ?: return false
-        val capabilities = manager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-    }
-
     private fun bindRecordingService() {
         if (bindRequested) return
         bindRequested = bindService(
@@ -876,7 +860,6 @@ class MainActivity : AppCompatActivity() {
         recordingService?.setListener(null)
         runCatching { unbindService(recordingConnection) }
         bindRequested = false
-        recordingServiceBound = false
         recordingService = null
     }
 
@@ -922,28 +905,37 @@ class MainActivity : AppCompatActivity() {
         imageImporter.close()
         textToSpeech?.stop()
         textToSpeech?.shutdown()
-        val nav = navigator
-        val listener = arrivalListener
-        if (nav != null && listener != null) nav.removeArrivalListener(listener)
-        nav?.cleanup()
         mapView.onDestroy()
         super.onDestroy()
     }
 
     companion object {
-        private const val MAX_NAVIGATION_WAYPOINTS = 25
-        private const val MIN_WAYPOINT_SPACING_METERS = 18f
-        private const val IMPORTANT_TURN_DEGREES = 32f
+        private const val OPENFREE_STYLE_URI = "https://tiles.openfreemap.org/styles/liberty"
+        private const val STYLE_FALLBACK_DELAY_MS = 8_000L
+
+        private const val LOCATION_INTERVAL_MS = 700L
+        private const val LOCATION_FASTEST_INTERVAL_MS = 350L
+        private const val LOCATION_MIN_DISTANCE_METERS = 1.0f
+        private const val MAX_RENDER_ACCURACY_METERS = 80f
+
+        private const val CAMERA_MIN_INTERVAL_MS = 450L
+        private const val CAMERA_ANIMATION_MS = 500
+        private const val MIN_BEARING_SPEED_MPS = 1.2f
+        private const val IDLE_ZOOM = 17.2
+        private const val RECORDING_ZOOM = 17.7
+        private const val NAVIGATION_ZOOM = 18.0
+
         private const val LOCAL_TURN_DEGREES = 42f
         private const val MIN_TURN_LOOKAHEAD_METERS = 25f
         private const val TURN_VOICE_DISTANCE_METERS = 120f
         private const val OFF_ROUTE_DISTANCE_METERS = 80f
         private const val DESTINATION_RADIUS_METERS = 35f
+        private const val MIN_EXTRA_BOTTOM_DP = 10
 
-        private val OSM_STYLE_JSON = """
+        private val OSM_FALLBACK_STYLE_JSON = """
             {
               "version": 8,
-              "name": "Rota Certa OpenStreetMap",
+              "name": "Rota Certa fallback",
               "sources": {
                 "osm": {
                   "type": "raster",
