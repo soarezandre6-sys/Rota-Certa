@@ -70,27 +70,12 @@
                 android:text="IMPORTAR PRINT" />
         </LinearLayout>
 
-        <LinearLayout
+        <Button
+            android:id="@+id/navigate_last_button"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="5dp">
-
-            <Button
-                android:id="@+id/navigate_last_button"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="NAVEGAR ROTA" />
-
-            <Button
-                android:id="@+id/stop_navigation_button"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="PARAR GPS" />
-        </LinearLayout>
+            android:layout_marginTop="5dp"
+            android:text="NAVEGAR NA ROTA SELECIONADA" />
     </LinearLayout>
 
 </FrameLayout>
