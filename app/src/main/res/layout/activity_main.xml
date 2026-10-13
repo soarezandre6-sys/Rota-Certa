@@ -133,7 +133,7 @@
                     android:text="INICIAR ROTA"
                     android:textColor="#FFFFFF"
                     android:textStyle="bold"
-                    app:backgroundTint="#0B9A66"
+                    app:backgroundTint="@color/start_route_button_tint"
                     app:cornerRadius="14dp" />
 
                 <com.google.android.material.button.MaterialButton
