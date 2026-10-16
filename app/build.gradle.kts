@@ -15,7 +15,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 7
-        versionName = "0.7.0-build7"
+        versionName = "0.7.0-build7-ajustes"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         buildConfigField("boolean", "GOOGLE_NAV_CONFIGURED", googleNavConfigured.toString())
     }
