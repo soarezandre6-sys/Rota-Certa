@@ -10,13 +10,14 @@ import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.rotacerta.app.location.RoadMatcher
+import com.rotacerta.app.model.RoutePoint
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
 class ImageRouteImporter(private val context: Context) {
 
@@ -53,6 +54,7 @@ class ImageRouteImporter(private val context: Context) {
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val executor = Executors.newSingleThreadExecutor()
+    private val roadMatcher = RoadMatcher()
 
     fun scanRouteImage(
         uri: Uri,
@@ -81,8 +83,8 @@ class ImageRouteImporter(private val context: Context) {
                                     val box = line.boundingBox ?: return@mapNotNull null
                                     OcrReference(
                                         label = label,
-                                        x = ((box.centerX().toFloat() / bitmap.width).coerceIn(0f, 1f)),
-                                        y = ((box.centerY().toFloat() / bitmap.height).coerceIn(0f, 1f))
+                                        x = (box.centerX().toFloat() / bitmap.width).coerceIn(0f, 1f),
+                                        y = (box.centerY().toFloat() / bitmap.height).coerceIn(0f, 1f)
                                     )
                                 }
                                 .distinctBy { it.label.lowercase(Locale.ROOT) }
@@ -145,6 +147,7 @@ class ImageRouteImporter(private val context: Context) {
                             sourceX = candidate.x,
                             sourceY = candidate.y
                         )
+
                         val duplicate = geocoded.any {
                             distanceMeters(
                                 it.latitude,
@@ -161,24 +164,29 @@ class ImageRouteImporter(private val context: Context) {
         }
     }
 
+    /**
+     * Reconstrói a linha do print, mas nunca devolve diretamente a geometria
+     * aproximada da imagem. O traçado reconstruído é apenas uma pista inicial e
+     * precisa passar pelo RoadMatcher antes de poder ser mostrado/salvo.
+     *
+     * Isso evita o comportamento antigo de ligar nomes de ruas ou pontos OCR em
+     * linha reta, que fazia a rota atravessar quarteirões, canteiros e rotatórias.
+     */
     fun reconstructRoute(scan: ScanResult, streets: List<GeocodedStreet>): ReconstructedRoute {
-        val fallback = streets.map { GeoPoint(it.latitude, it.longitude) }
         if (scan.visualTrace.size < MIN_TRACE_POINTS || streets.size < MIN_ANCHORS_FOR_VISUAL_ROUTE) {
-            return ReconstructedRoute(fallback, false, if (streets.size >= 3) 55 else 35)
+            return rejectedRoute()
         }
 
         val latFit = fitAffine(streets) { it.latitude }
         val lonFit = fitAffine(streets) { it.longitude }
-        if (latFit == null || lonFit == null) {
-            return ReconstructedRoute(fallback, false, 45)
-        }
+        if (latFit == null || lonFit == null) return rejectedRoute()
 
         val anchorMinLat = streets.minOf { it.latitude }
         val anchorMaxLat = streets.maxOf { it.latitude }
         val anchorMinLon = streets.minOf { it.longitude }
         val anchorMaxLon = streets.maxOf { it.longitude }
-        val latPad = max((anchorMaxLat - anchorMinLat) * 1.8, 0.006)
-        val lonPad = max((anchorMaxLon - anchorMinLon) * 1.8, 0.006)
+        val latPad = max((anchorMaxLat - anchorMinLat) * 1.5, 0.004)
+        val lonPad = max((anchorMaxLon - anchorMinLon) * 1.5, 0.004)
 
         val transformed = scan.visualTrace.mapNotNull { p ->
             val lat = latFit[0] + latFit[1] * p.x + latFit[2] * p.y
@@ -194,24 +202,114 @@ class ImageRouteImporter(private val context: Context) {
             if (previous == null) {
                 cleaned += point
             } else {
-                val d = distanceMeters(previous.latitude, previous.longitude, point.latitude, point.longitude)
-                if (d in MIN_VISUAL_POINT_SPACING_METERS..MAX_VISUAL_JUMP_METERS) cleaned += point
+                val distance = distanceMeters(
+                    previous.latitude,
+                    previous.longitude,
+                    point.latitude,
+                    point.longitude
+                )
+                if (distance in MIN_VISUAL_POINT_SPACING_METERS..MAX_VISUAL_JUMP_METERS) {
+                    cleaned += point
+                }
             }
         }
 
-        if (cleaned.size < MIN_RECONSTRUCTED_POINTS) {
-            return ReconstructedRoute(fallback, false, 50)
-        }
+        if (cleaned.size < MIN_RECONSTRUCTED_POINTS) return rejectedRoute()
 
-        val simplified = if (cleaned.size <= MAX_RECONSTRUCTED_POINTS) cleaned else {
+        val simplified = if (cleaned.size <= MAX_RECONSTRUCTED_POINTS) {
+            cleaned
+        } else {
             val step = (cleaned.size - 1).toFloat() / (MAX_RECONSTRUCTED_POINTS - 1)
             (0 until MAX_RECONSTRUCTED_POINTS).map { index ->
                 cleaned[(index * step).toInt().coerceIn(0, cleaned.lastIndex)]
             }
         }
 
-        val confidence = (60 + min(25, streets.size * 4) + min(10, scan.visualTrace.size / 15)).coerceAtMost(92)
-        return ReconstructedRoute(simplified, true, confidence)
+        val sourceRoutePoints = toRoutePoints(simplified)
+        val matched = roadMatcher.match(sourceRoutePoints) ?: return rejectedRoute()
+        if (matched.size < MIN_MATCHED_ROUTE_POINTS) return rejectedRoute()
+
+        if (!isPlausibleRoadMatch(sourceRoutePoints, matched)) return rejectedRoute()
+
+        val matchedGeo = matched.map { GeoPoint(it.latitude, it.longitude) }
+        val baseConfidence = 68 + min(18, streets.size * 3) + min(8, scan.visualTrace.size / 18)
+        val confidence = baseConfidence.coerceIn(72, 94)
+
+        return ReconstructedRoute(
+            points = matchedGeo,
+            usedVisualTrace = true,
+            confidence = confidence
+        )
+    }
+
+    private fun rejectedRoute(): ReconstructedRoute =
+        ReconstructedRoute(emptyList(), usedVisualTrace = false, confidence = 0)
+
+    private fun toRoutePoints(points: List<GeoPoint>): List<RoutePoint> {
+        val now = System.currentTimeMillis()
+        return points.mapIndexed { index, point ->
+            RoutePoint(
+                latitude = point.latitude,
+                longitude = point.longitude,
+                timestamp = now + index * 1_000L,
+                accuracy = IMPORTED_TRACE_ACCURACY_METERS,
+                speed = 0f,
+                bearing = 0f,
+                altitude = null
+            )
+        }
+    }
+
+    /**
+     * Proteção extra contra um matching tecnicamente válido, mas geograficamente
+     * absurdo. A rota encaixada precisa permanecer próxima da linha reconstruída
+     * e não pode explodir para uma distância muitas vezes maior que a candidata.
+     */
+    private fun isPlausibleRoadMatch(source: List<RoutePoint>, matched: List<RoutePoint>): Boolean {
+        if (source.size < 2 || matched.size < 2) return false
+
+        val rawDistance = routeDistance(source)
+        val matchedDistance = routeDistance(matched)
+        if (rawDistance <= 0f || matchedDistance <= 0f) return false
+        if (matchedDistance > rawDistance * MAX_MATCH_DISTANCE_RATIO + MAX_MATCH_EXTRA_METERS) return false
+
+        val sampleStep = max(1, source.size / MAX_PROXIMITY_SAMPLES)
+        var checked = 0
+        var totalNearest = 0f
+        var index = 0
+
+        while (index < source.size) {
+            val point = source[index]
+            var nearest = Float.MAX_VALUE
+            matched.forEach { candidate ->
+                val distance = distanceMeters(
+                    point.latitude,
+                    point.longitude,
+                    candidate.latitude,
+                    candidate.longitude
+                )
+                if (distance < nearest) nearest = distance
+            }
+            totalNearest += nearest
+            checked += 1
+            index += sampleStep
+        }
+
+        val averageNearest = if (checked > 0) totalNearest / checked else Float.MAX_VALUE
+        return averageNearest <= MAX_AVERAGE_MATCH_OFFSET_METERS
+    }
+
+    private fun routeDistance(points: List<RoutePoint>): Float {
+        var total = 0f
+        for (index in 1 until points.size) {
+            total += distanceMeters(
+                points[index - 1].latitude,
+                points[index - 1].longitude,
+                points[index].latitude,
+                points[index].longitude
+            )
+        }
+        return total
     }
 
     private fun extractRouteTrace(bitmap: Bitmap): List<ImagePoint> {
@@ -230,7 +328,9 @@ class ImageRouteImporter(private val context: Context) {
                 val saturation = hsv[1]
                 val value = hsv[2]
                 val routeLike = hue in BLUE_HUE_MIN..BLUE_HUE_MAX &&
-                    saturation >= BLUE_MIN_SATURATION && value >= BLUE_MIN_VALUE
+                    saturation >= BLUE_MIN_SATURATION &&
+                    value >= BLUE_MIN_VALUE
+
                 if (routeLike) {
                     val gx = ((x.toFloat() / bitmap.width) * grid).toInt().coerceIn(0, grid - 1)
                     val gy = ((y.toFloat() / bitmap.height) * grid).toInt().coerceIn(0, grid - 1)
@@ -248,7 +348,10 @@ class ImageRouteImporter(private val context: Context) {
         val ordered = orderComponent(largest, grid)
         if (ordered.size < MIN_TRACE_POINTS) return emptyList()
 
-        val reduced = ordered.filterIndexed { index, _ -> index == 0 || index == ordered.lastIndex || index % TRACE_SIMPLIFY_STEP == 0 }
+        val reduced = ordered.filterIndexed { index, _ ->
+            index == 0 || index == ordered.lastIndex || index % TRACE_SIMPLIFY_STEP == 0
+        }
+
         return reduced.map { cell ->
             val gx = cell % grid
             val gy = cell / grid
@@ -273,8 +376,8 @@ class ImageRouteImporter(private val context: Context) {
             while (queue.isNotEmpty()) {
                 val cell = queue.removeFirst()
                 component += cell
-                neighbors(cell, grid).forEach { n ->
-                    if (remaining.remove(n)) queue.add(n)
+                neighbors(cell, grid).forEach { neighbor ->
+                    if (remaining.remove(neighbor)) queue.add(neighbor)
                 }
             }
             if (component.size > best.size) best = component
@@ -325,11 +428,15 @@ class ImageRouteImporter(private val context: Context) {
         val x = cell % grid
         val y = cell / grid
         val result = ArrayList<Int>(8)
-        for (dy in -1..1) for (dx in -1..1) {
-            if (dx == 0 && dy == 0) continue
-            val nx = x + dx
-            val ny = y + dy
-            if (nx in 0 until grid && ny in 0 until grid) result += ny * grid + nx
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                if (dx == 0 && dy == 0) continue
+                val nx = x + dx
+                val ny = y + dy
+                if (nx in 0 until grid && ny in 0 until grid) {
+                    result += ny * grid + nx
+                }
+            }
         }
         return result
     }
@@ -363,33 +470,40 @@ class ImageRouteImporter(private val context: Context) {
             syv += y * v
         }
 
-        val a = arrayOf(
+        val matrix = arrayOf(
             doubleArrayOf(s1, sx, sy, sv),
             doubleArrayOf(sx, sxx, sxy, sxv),
             doubleArrayOf(sy, sxy, syy, syv)
         )
-        return solve3x3(a)
+        return solve3x3(matrix)
     }
 
-    private fun solve3x3(m: Array<DoubleArray>): DoubleArray? {
-        for (col in 0..2) {
-            var pivot = col
-            for (row in col + 1..2) if (abs(m[row][col]) > abs(m[pivot][col])) pivot = row
-            if (abs(m[pivot][col]) < 1e-9) return null
-            if (pivot != col) {
-                val tmp = m[pivot]
-                m[pivot] = m[col]
-                m[col] = tmp
+    private fun solve3x3(matrix: Array<DoubleArray>): DoubleArray? {
+        for (column in 0..2) {
+            var pivot = column
+            for (row in column + 1..2) {
+                if (abs(matrix[row][column]) > abs(matrix[pivot][column])) pivot = row
             }
-            val div = m[col][col]
-            for (k in col..3) m[col][k] /= div
+            if (abs(matrix[pivot][column]) < 1e-9) return null
+
+            if (pivot != column) {
+                val temp = matrix[pivot]
+                matrix[pivot] = matrix[column]
+                matrix[column] = temp
+            }
+
+            val divisor = matrix[column][column]
+            for (index in column..3) matrix[column][index] /= divisor
+
             for (row in 0..2) {
-                if (row == col) continue
-                val factor = m[row][col]
-                for (k in col..3) m[row][k] -= factor * m[col][k]
+                if (row == column) continue
+                val factor = matrix[row][column]
+                for (index in column..3) {
+                    matrix[row][index] -= factor * matrix[column][index]
+                }
             }
         }
-        return doubleArrayOf(m[0][3], m[1][3], m[2][3])
+        return doubleArrayOf(matrix[0][3], matrix[1][3], matrix[2][3])
     }
 
     private fun resolveAreaSuffix(
@@ -457,9 +571,16 @@ class ImageRouteImporter(private val context: Context) {
 
         private const val MIN_ANCHORS_FOR_VISUAL_ROUTE = 3
         private const val MIN_RECONSTRUCTED_POINTS = 6
-        private const val MAX_RECONSTRUCTED_POINTS = 100
+        private const val MAX_RECONSTRUCTED_POINTS = 90
+        private const val MIN_MATCHED_ROUTE_POINTS = 4
         private const val MIN_VISUAL_POINT_SPACING_METERS = 8f
-        private const val MAX_VISUAL_JUMP_METERS = 2_500f
+        private const val MAX_VISUAL_JUMP_METERS = 700f
+        private const val IMPORTED_TRACE_ACCURACY_METERS = 35f
+
+        private const val MAX_MATCH_DISTANCE_RATIO = 2.8f
+        private const val MAX_MATCH_EXTRA_METERS = 600f
+        private const val MAX_AVERAGE_MATCH_OFFSET_METERS = 60f
+        private const val MAX_PROXIMITY_SAMPLES = 20
 
         private val STREET_HINTS = listOf(
             "rua ", "r. ", "avenida ", "av. ", "rodovia ", "rod. ",
