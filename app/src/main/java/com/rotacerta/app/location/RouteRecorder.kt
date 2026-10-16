@@ -33,6 +33,9 @@ class RouteRecorder(context: Context) {
     private var matchInFlight = false
 
     @Volatile
+    private var consecutiveMatchFailures = 0
+
+    @Volatile
     private var running = false
 
     @Volatile
@@ -62,6 +65,7 @@ class RouteRecorder(context: Context) {
         matchedPoints = emptyList()
         matchedRawCount = 0
         matchInFlight = false
+        consecutiveMatchFailures = 0
         lastMatchStartedAt = 0L
 
         running = true
@@ -96,7 +100,9 @@ class RouteRecorder(context: Context) {
      * cima do mapa porque ela voltaria a cortar curvas/rotatorias enquanto aguarda
      * a proxima resposta. A posicao atual continua sendo mostrada pelo GPS ao vivo.
      *
-     * Ao encerrar, a cauda ainda nao processada e anexada para nao perder pontos.
+     * Se o servico de matching falhar repetidamente (por exemplo, sem internet),
+     * o app volta automaticamente ao GPS bruto para a rota continuar crescendo.
+     * Ao encerrar, a cauda ainda nao processada tambem e anexada para nao perder pontos.
      */
     fun snapshot(): List<RoutePoint> {
         val raw = synchronized(lock) { rawPoints.toList() }
@@ -104,7 +110,9 @@ class RouteRecorder(context: Context) {
         val consumed = matchedRawCount.coerceIn(0, raw.size)
 
         if (matched.size < 2 || consumed < 2) return raw
-        if (running || consumed >= raw.size) return matched
+
+        val canKeepRoadOnly = running && consecutiveMatchFailures < FAILURES_BEFORE_RAW_FALLBACK
+        if (canKeepRoadOnly || consumed >= raw.size) return matched
 
         val combined = ArrayList<RoutePoint>(matched.size + raw.size - consumed)
         combined += matched
@@ -178,14 +186,24 @@ class RouteRecorder(context: Context) {
         matcherExecutor.execute {
             val corrected = roadMatcher.match(source)
 
-            if (corrected != null && corrected.size >= 2 && requestedSession == sessionId) {
-                matchedPoints = corrected
-                matchedRawCount = source.size
+            if (requestedSession == sessionId) {
+                if (corrected != null && corrected.size >= 2) {
+                    matchedPoints = corrected
+                    matchedRawCount = source.size
+                    consecutiveMatchFailures = 0
 
-                // Forca um novo snapshot para a tela substituir segmentos retos
-                // pelo traçado encaixado nas ruas e nas rotatorias.
-                if (running) {
-                    onPoint?.invoke(source.last(), currentDistanceMeters())
+                    // Forca um novo snapshot para a tela substituir segmentos retos
+                    // pelo traçado encaixado nas ruas e nas rotatorias.
+                    if (running) {
+                        onPoint?.invoke(source.last(), currentDistanceMeters())
+                    }
+                } else {
+                    consecutiveMatchFailures += 1
+                    if (running && consecutiveMatchFailures >= FAILURES_BEFORE_RAW_FALLBACK) {
+                        // Atualiza a UI para ela entrar no modo GPS bruto enquanto a
+                        // rede/servico nao volta, sem interromper a gravacao.
+                        onPoint?.invoke(source.last(), currentDistanceMeters())
+                    }
                 }
             }
 
@@ -208,6 +226,7 @@ class RouteRecorder(context: Context) {
         private const val MATCH_INTERVAL_MS = 2_000L
         private const val MIN_POINTS_FOR_ROAD_MATCH = 4
         private const val MIN_NEW_POINTS_FOR_ROAD_MATCH = 4
+        private const val FAILURES_BEFORE_RAW_FALLBACK = 2
         private const val MIN_OUTPUT_SPACING_METERS = 0.8f
     }
 }
