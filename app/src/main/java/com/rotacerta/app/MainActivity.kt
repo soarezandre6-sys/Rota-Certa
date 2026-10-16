@@ -71,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stopButton: Button
     private lateinit var navigateButton: Button
     private lateinit var centerLocationButton: ImageButton
+    private lateinit var cameraModeButton: Button
     private lateinit var routeStore: RouteStore
     private lateinit var imageImporter: ImageRouteImporter
 
@@ -104,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     private var liveLocationUpdatesActive = false
     private var centeredOnUserOnce = false
     private var lastCameraFollowAt = 0L
+    private var cameraAutoFollow = true
 
     private var lastSavedRoute: RecordedRoute? = null
     private var localNavigationRoute: RecordedRoute? = null
@@ -181,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         stopButton = findViewById(R.id.stop_button)
         navigateButton = findViewById(R.id.navigate_last_button)
         centerLocationButton = findViewById(R.id.center_location_button)
+        cameraModeButton = findViewById(R.id.camera_mode_button)
         controlPanelBody = findViewById(R.id.control_panel_body)
         panelToggle = findViewById(R.id.panel_toggle)
         navigationInstructionPanel = findViewById(R.id.navigation_instruction_panel)
@@ -189,6 +192,7 @@ class MainActivity : AppCompatActivity() {
         navigationSecondaryText = findViewById(R.id.navigation_secondary_text)
 
         applySystemBarInsets()
+        updateCameraModeButton()
 
         routeStore = RouteStore(this)
         imageImporter = ImageRouteImporter(this)
@@ -233,6 +237,9 @@ class MainActivity : AppCompatActivity() {
                 toast("Aguardando uma posição GPS válida.")
             }
         }
+        cameraModeButton.setOnClickListener {
+            setCameraAutoFollow(!cameraAutoFollow, recenter = true)
+        }
 
         if (hasLocationPermission()) startLiveLocationUpdates()
         else requestLocationPermission(startRecordingAfter = false)
@@ -256,6 +263,36 @@ class MainActivity : AppCompatActivity() {
         navigationInstructionPanel.visibility = View.GONE
     }
 
+    private fun setCameraAutoFollow(enabled: Boolean, recenter: Boolean) {
+        cameraAutoFollow = enabled
+        updateCameraModeButton()
+
+        if (enabled) {
+            if (recenter) {
+                currentLocation?.let { location ->
+                    centeredOnUserOnce = true
+                    centerMapOn(
+                        location = location,
+                        driving = recordingUiActive || localNavigationRoute != null,
+                        immediate = false
+                    )
+                }
+            }
+            toast("Câmera automática ativada")
+        } else {
+            toast("Câmera livre: ajuste zoom, rotação e ângulo como quiser")
+        }
+    }
+
+    private fun updateCameraModeButton() {
+        cameraModeButton.text = if (cameraAutoFollow) "AUTO" else "LIVRE"
+        cameraModeButton.contentDescription = if (cameraAutoFollow) {
+            "Câmera automática. Toque para usar câmera livre"
+        } else {
+            "Câmera livre. Toque para voltar à câmera automática"
+        }
+    }
+
     private fun loadVectorMapStyle(mapLibreMap: MapLibreMap) {
         mapStyleReady = false
         vectorStyleLoaded = false
@@ -269,8 +306,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Se o estilo Bright não responder, preserva um segundo mapa vetorial
-        // antes de cair para o raster básico. Assim a navegação não perde detalhes.
         mapView.postDelayed({
             if (!vectorStyleLoaded && !isFinishing && map === mapLibreMap) {
                 mapStyleAttempt += 1
@@ -341,10 +376,12 @@ class MainActivity : AppCompatActivity() {
             insets
         }
         ViewCompat.setOnApplyWindowInsetsListener(centerLocationButton, topInsetListener)
+        ViewCompat.setOnApplyWindowInsetsListener(cameraModeButton, topInsetListener)
         ViewCompat.setOnApplyWindowInsetsListener(navigationInstructionPanel, topInsetListener)
 
         ViewCompat.requestApplyInsets(panel)
         ViewCompat.requestApplyInsets(centerLocationButton)
+        ViewCompat.requestApplyInsets(cameraModeButton)
         ViewCompat.requestApplyInsets(navigationInstructionPanel)
     }
 
@@ -368,6 +405,7 @@ class MainActivity : AppCompatActivity() {
     private fun startRecordingNow() {
         stopLocalNavigation(updateStatus = false)
         maybeRequestNotificationPermission()
+        setCameraAutoFollow(true, recenter = false)
         pendingStartRecording = true
         recordingUiActive = true
         centeredOnUserOnce = true
@@ -520,6 +558,7 @@ class MainActivity : AppCompatActivity() {
         centeredOnUserOnce = true
         streetNameCache.clear()
         pendingStreetLookupIndex = null
+        setCameraAutoFollow(true, recenter = false)
         navigateButton.text = "ENCERRAR NAVEGAÇÃO"
         setControlsCollapsed(true)
         showNavigationInstruction("↑", "Navegação iniciada", "Aguardando próxima instrução")
@@ -883,7 +922,8 @@ class MainActivity : AppCompatActivity() {
             marker.position = latLng
         }
 
-        val shouldFollow = forceFollow || recordingUiActive || localNavigationRoute != null || !centeredOnUserOnce
+        val shouldFollow = cameraAutoFollow &&
+            (forceFollow || recordingUiActive || localNavigationRoute != null || !centeredOnUserOnce)
         if (shouldFollow) {
             centerMapOn(
                 location = location,
@@ -949,20 +989,20 @@ class MainActivity : AppCompatActivity() {
     private fun navigationZoom(location: Location): Double {
         val speed = if (location.hasSpeed()) location.speed else 0f
         return when {
-            speed >= 24f -> 17.85
-            speed >= 15f -> 18.10
-            speed >= 8f -> 18.35
-            else -> 18.65
+            speed >= 24f -> 17.65
+            speed >= 15f -> 17.90
+            speed >= 8f -> 18.15
+            else -> 18.40
         }
     }
 
     private fun navigationLookAheadMeters(location: Location): Double {
         val speed = if (location.hasSpeed()) location.speed else 0f
         return when {
-            speed >= 24f -> 105.0
-            speed >= 15f -> 85.0
-            speed >= 8f -> 65.0
-            else -> 45.0
+            speed >= 24f -> 120.0
+            speed >= 15f -> 95.0
+            speed >= 8f -> 75.0
+            else -> 55.0
         }
     }
 
@@ -1091,10 +1131,10 @@ class MainActivity : AppCompatActivity() {
         private const val CAMERA_ANIMATION_MS = 520
         private const val MIN_BEARING_SPEED_MPS = 1.2f
         private const val IDLE_ZOOM = 17.4
-        private const val RECORDING_ZOOM = 18.15
+        private const val RECORDING_ZOOM = 17.95
         private const val RECORDING_TILT = 36.0
         private const val NAVIGATION_TILT = 55.0
-        private const val RECORDING_LOOK_AHEAD_METERS = 32.0
+        private const val RECORDING_LOOK_AHEAD_METERS = 40.0
         private const val EARTH_RADIUS_METERS = 6_371_000.0
 
         private const val LOCAL_TURN_DEGREES = 42f
