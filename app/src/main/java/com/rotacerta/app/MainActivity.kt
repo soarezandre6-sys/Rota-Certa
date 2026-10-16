@@ -56,8 +56,12 @@ import org.maplibre.android.maps.Style
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class MainActivity : AppCompatActivity() {
 
@@ -88,6 +92,7 @@ class MainActivity : AppCompatActivity() {
     private var map: MapLibreMap? = null
     private var mapStyleReady = false
     private var vectorStyleLoaded = false
+    private var mapStyleAttempt = 0
 
     private var recordedOutline: Polyline? = null
     private var recordedPolyline: Polyline? = null
@@ -254,21 +259,46 @@ class MainActivity : AppCompatActivity() {
     private fun loadVectorMapStyle(mapLibreMap: MapLibreMap) {
         mapStyleReady = false
         vectorStyleLoaded = false
-        mapLibreMap.setStyle(Style.Builder().fromUri(OPENFREE_STYLE_URI)) {
-            vectorStyleLoaded = true
-            onMapStyleReady()
+
+        mapStyleAttempt += 1
+        val brightAttempt = mapStyleAttempt
+        mapLibreMap.setStyle(Style.Builder().fromUri(OPENFREE_BRIGHT_STYLE_URI)) {
+            if (mapStyleAttempt == brightAttempt) {
+                vectorStyleLoaded = true
+                onMapStyleReady()
+            }
         }
 
+        // Se o estilo Bright não responder, preserva um segundo mapa vetorial
+        // antes de cair para o raster básico. Assim a navegação não perde detalhes.
         mapView.postDelayed({
             if (!vectorStyleLoaded && !isFinishing && map === mapLibreMap) {
-                mapLibreMap.setStyle(Style.Builder().fromJson(OSM_FALLBACK_STYLE_JSON)) {
-                    onMapStyleReady()
-                    if (!recordingUiActive && localNavigationRoute == null) {
-                        statusText.text = "Mapa básico carregado • GPS pronto"
+                mapStyleAttempt += 1
+                val libertyAttempt = mapStyleAttempt
+                mapLibreMap.setStyle(Style.Builder().fromUri(OPENFREE_LIBERTY_STYLE_URI)) {
+                    if (mapStyleAttempt == libertyAttempt) {
+                        vectorStyleLoaded = true
+                        onMapStyleReady()
                     }
                 }
             }
-        }, STYLE_FALLBACK_DELAY_MS)
+        }, VECTOR_STYLE_FALLBACK_DELAY_MS)
+
+        mapView.postDelayed({
+            if (!vectorStyleLoaded && !isFinishing && map === mapLibreMap) {
+                mapStyleAttempt += 1
+                val rasterAttempt = mapStyleAttempt
+                mapLibreMap.setStyle(Style.Builder().fromJson(OSM_FALLBACK_STYLE_JSON)) {
+                    if (mapStyleAttempt == rasterAttempt) {
+                        vectorStyleLoaded = false
+                        onMapStyleReady()
+                        if (!recordingUiActive && localNavigationRoute == null) {
+                            statusText.text = "Mapa básico carregado • GPS pronto"
+                        }
+                    }
+                }
+            }
+        }, RASTER_STYLE_FALLBACK_DELAY_MS)
     }
 
     private fun onMapStyleReady() {
@@ -277,7 +307,11 @@ class MainActivity : AppCompatActivity() {
         lastSavedRoute?.let(::drawSavedRoute)
         currentLocation?.let { renderLiveLocation(it, forceFollow = !centeredOnUserOnce) }
         if (!recordingUiActive && localNavigationRoute == null) {
-            statusText.text = if (vectorStyleLoaded) "Mapa vetorial e GPS prontos" else "Mapa e GPS prontos"
+            statusText.text = if (vectorStyleLoaded) {
+                "Mapa detalhado e GPS prontos"
+            } else {
+                "Mapa e GPS prontos"
+            }
         }
     }
 
@@ -366,10 +400,10 @@ class MainActivity : AppCompatActivity() {
             if (latLngs.size >= 2 && mapStyleReady) {
                 if (recordedOutline == null) {
                     recordedOutline = map?.addPolyline(
-                        PolylineOptions().addAll(latLngs).width(12f).color(Color.rgb(14, 50, 76))
+                        PolylineOptions().addAll(latLngs).width(16f).color(Color.rgb(13, 45, 68))
                     )
                     recordedPolyline = map?.addPolyline(
-                        PolylineOptions().addAll(latLngs).width(7f).color(Color.rgb(0, 190, 140))
+                        PolylineOptions().addAll(latLngs).width(9f).color(Color.rgb(0, 210, 153))
                     )
                 } else {
                     recordedOutline?.points = latLngs
@@ -479,8 +513,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         lastSavedRoute = route
-        drawSavedRoute(route)
         localNavigationRoute = route
+        drawSavedRoute(route)
         lastSpokenTurnIndex = -1
         offRouteAnnounced = false
         centeredOnUserOnce = true
@@ -649,12 +683,12 @@ class MainActivity : AppCompatActivity() {
                     val traceMessage = if (scan.visualTrace.isNotEmpty()) {
                         "Também detectei a linha colorida do trajeto."
                     } else {
-                        "Não consegui isolar a linha da rota; vou usar as ruas reconhecidas."
+                        "Não consegui isolar a linha da rota; preciso da linha do percurso visível para montar com segurança."
                     }
                     val labels = scan.references.take(14).joinToString("\n") { "• ${it.label}" }
                     AlertDialog.Builder(this)
                         .setTitle("Rota encontrada no print")
-                        .setMessage("$labels\n\n$traceMessage\nVou reconstruir a rota e mostrar uma prévia para você conferir.")
+                        .setMessage("$labels\n\n$traceMessage\nVou reconstruir a rota, encaixar nas ruas reais e mostrar uma prévia para você conferir.")
                         .setNegativeButton("Cancelar", null)
                         .setPositiveButton("Montar rota") { _, _ -> geocodeImportedRoute(scan) }
                         .show()
@@ -680,8 +714,8 @@ class MainActivity : AppCompatActivity() {
                     val reconstructed = imageImporter.reconstructRoute(scan, streets)
                     runOnUiThread {
                         if (reconstructed.points.size < 2) {
-                            statusText.text = "O print não trouxe dados suficientes para montar uma rota"
-                            toast("Tente um print maior, com mais nomes de ruas e a linha do percurso visível.")
+                            statusText.text = "Não consegui montar uma rota confiável a partir desse print"
+                            toast("A importação foi rejeitada para evitar uma rota errada. Tente um print maior, com a linha do percurso e nomes de ruas bem visíveis.")
                         } else {
                             showImportedRoutePreview(streets, reconstructed)
                         }
@@ -724,7 +758,11 @@ class MainActivity : AppCompatActivity() {
         )
 
         drawSavedRoute(temporary)
-        val method = if (reconstructed.usedVisualTrace) "Linha visual + nomes das ruas" else "Nomes das ruas"
+        val method = if (reconstructed.usedVisualTrace) {
+            "Linha visual + nomes das ruas + encaixe viário"
+        } else {
+            "Encaixe viário"
+        }
         val labels = streets.take(10).joinToString("\n") { "• ${it.label}" }
         AlertDialog.Builder(this)
             .setTitle("Prévia da rota importada")
@@ -787,10 +825,10 @@ class MainActivity : AppCompatActivity() {
 
         if (points.size >= 2) {
             savedRouteOutline = map?.addPolyline(
-                PolylineOptions().addAll(points).width(14f).color(Color.rgb(20, 45, 72))
+                PolylineOptions().addAll(points).width(19f).color(Color.rgb(18, 38, 63))
             )
             savedRoutePolyline = map?.addPolyline(
-                PolylineOptions().addAll(points).width(8f).color(Color.rgb(20, 115, 230))
+                PolylineOptions().addAll(points).width(11f).color(Color.rgb(28, 126, 247))
             )
             runCatching {
                 val bounds = LatLngBounds.fromLatLngs(points)
@@ -872,26 +910,81 @@ class MainActivity : AppCompatActivity() {
         if (!immediate && now - lastCameraFollowAt < CAMERA_MIN_INTERVAL_MS) return
         lastCameraFollowAt = now
 
-        val target = LatLng(location.latitude, location.longitude)
+        val baseTarget = LatLng(location.latitude, location.longitude)
         if (driving) {
-            val bearing = if (location.hasBearing() && location.speed >= MIN_BEARING_SPEED_MPS) {
+            val hasReliableBearing = location.hasBearing() && location.speed >= MIN_BEARING_SPEED_MPS
+            val bearing = if (hasReliableBearing) {
                 location.bearing.toDouble()
             } else {
                 currentMap.cameraPosition.bearing
             }
+
+            val navigating = localNavigationRoute != null
+            val lookAheadMeters = if (navigating) {
+                navigationLookAheadMeters(location)
+            } else {
+                RECORDING_LOOK_AHEAD_METERS
+            }
+            val target = if (hasReliableBearing) {
+                projectAhead(location, bearing, lookAheadMeters)
+            } else {
+                baseTarget
+            }
+
             val camera = CameraPosition.Builder()
                 .target(target)
-                .zoom(if (localNavigationRoute != null) NAVIGATION_ZOOM else RECORDING_ZOOM)
+                .zoom(if (navigating) navigationZoom(location) else RECORDING_ZOOM)
                 .bearing(bearing)
-                .tilt(if (localNavigationRoute != null) 48.0 else 28.0)
+                .tilt(if (navigating) NAVIGATION_TILT else RECORDING_TILT)
                 .build()
             if (immediate) currentMap.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
             else currentMap.animateCamera(CameraUpdateFactory.newCameraPosition(camera), CAMERA_ANIMATION_MS)
         } else {
-            val update = CameraUpdateFactory.newLatLngZoom(target, IDLE_ZOOM)
+            val update = CameraUpdateFactory.newLatLngZoom(baseTarget, IDLE_ZOOM)
             if (immediate) currentMap.moveCamera(update)
             else currentMap.animateCamera(update, CAMERA_ANIMATION_MS)
         }
+    }
+
+    private fun navigationZoom(location: Location): Double {
+        val speed = if (location.hasSpeed()) location.speed else 0f
+        return when {
+            speed >= 24f -> 17.85
+            speed >= 15f -> 18.10
+            speed >= 8f -> 18.35
+            else -> 18.65
+        }
+    }
+
+    private fun navigationLookAheadMeters(location: Location): Double {
+        val speed = if (location.hasSpeed()) location.speed else 0f
+        return when {
+            speed >= 24f -> 105.0
+            speed >= 15f -> 85.0
+            speed >= 8f -> 65.0
+            else -> 45.0
+        }
+    }
+
+    private fun projectAhead(location: Location, bearingDegrees: Double, distanceMeters: Double): LatLng {
+        val angularDistance = distanceMeters / EARTH_RADIUS_METERS
+        val bearing = Math.toRadians(bearingDegrees)
+        val latitude = Math.toRadians(location.latitude)
+        val longitude = Math.toRadians(location.longitude)
+
+        val projectedLatitude = asin(
+            sin(latitude) * cos(angularDistance) +
+                cos(latitude) * sin(angularDistance) * cos(bearing)
+        )
+        val projectedLongitude = longitude + atan2(
+            sin(bearing) * sin(angularDistance) * cos(latitude),
+            cos(angularDistance) - sin(latitude) * sin(projectedLatitude)
+        )
+
+        return LatLng(
+            Math.toDegrees(projectedLatitude),
+            Math.toDegrees(projectedLongitude)
+        )
     }
 
     private fun formatDistance(distanceMeters: Float): String =
@@ -984,8 +1077,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val OPENFREE_STYLE_URI = "https://tiles.openfreemap.org/styles/liberty"
-        private const val STYLE_FALLBACK_DELAY_MS = 8_000L
+        private const val OPENFREE_BRIGHT_STYLE_URI = "https://tiles.openfreemap.org/styles/bright"
+        private const val OPENFREE_LIBERTY_STYLE_URI = "https://tiles.openfreemap.org/styles/liberty"
+        private const val VECTOR_STYLE_FALLBACK_DELAY_MS = 5_000L
+        private const val RASTER_STYLE_FALLBACK_DELAY_MS = 10_000L
 
         private const val LOCATION_INTERVAL_MS = 700L
         private const val LOCATION_FASTEST_INTERVAL_MS = 350L
@@ -993,11 +1088,14 @@ class MainActivity : AppCompatActivity() {
         private const val MAX_RENDER_ACCURACY_METERS = 80f
 
         private const val CAMERA_MIN_INTERVAL_MS = 450L
-        private const val CAMERA_ANIMATION_MS = 500
+        private const val CAMERA_ANIMATION_MS = 520
         private const val MIN_BEARING_SPEED_MPS = 1.2f
-        private const val IDLE_ZOOM = 17.2
-        private const val RECORDING_ZOOM = 17.7
-        private const val NAVIGATION_ZOOM = 18.0
+        private const val IDLE_ZOOM = 17.4
+        private const val RECORDING_ZOOM = 18.15
+        private const val RECORDING_TILT = 36.0
+        private const val NAVIGATION_TILT = 55.0
+        private const val RECORDING_LOOK_AHEAD_METERS = 32.0
+        private const val EARTH_RADIUS_METERS = 6_371_000.0
 
         private const val LOCAL_TURN_DEGREES = 42f
         private const val MIN_TURN_LOOKAHEAD_METERS = 25f
