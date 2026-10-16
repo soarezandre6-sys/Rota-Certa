@@ -27,6 +27,11 @@
             android:foregroundServiceType="location" />
 
         <activity
+            android:name=".StreetRouteActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait">
