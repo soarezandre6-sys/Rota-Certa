@@ -200,6 +200,17 @@
                     app:cornerRadius="14dp" />
             </LinearLayout>
 
+            <com.rotacerta.app.ui.StreetRouteButton
+                android:id="@+id/create_street_route_button"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="6dp"
+                android:text="CRIAR ROTA POR RUAS"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                app:backgroundTint="#5C3F99"
+                app:cornerRadius="14dp" />
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/navigate_last_button"
                 android:layout_width="match_parent"
