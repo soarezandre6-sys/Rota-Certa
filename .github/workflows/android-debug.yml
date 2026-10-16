@@ -1,8 +1,6 @@
 name: Rota Certa Android Debug
 
 on:
-  push:
-    branches: [build-7-rota-certa]
   workflow_dispatch:
 
 concurrency:
