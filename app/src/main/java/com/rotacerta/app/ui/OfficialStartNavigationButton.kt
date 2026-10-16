@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.location.Location
 import android.util.AttributeSet
-import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.button.MaterialButton
@@ -20,37 +19,17 @@ class OfficialStartNavigationButton @JvmOverloads constructor(
     defStyleAttr: Int = com.google.android.material.R.attr.materialButtonStyle
 ) : MaterialButton(context, attrs, defStyleAttr) {
 
-    private var delegatedClick: OnClickListener? = null
-    private var internalListenerInstalled = false
-
-    override fun setOnClickListener(listener: OnClickListener?) {
-        if (!internalListenerInstalled) {
-            delegatedClick = listener
-            internalListenerInstalled = true
-            super.setOnClickListener { view -> interceptNavigationClick(view) }
-        } else {
-            delegatedClick = listener
-        }
-    }
-
-    private fun interceptNavigationClick(view: View) {
-        val activity = findMainActivity()
-        if (activity == null) {
-            delegatedClick?.onClick(view)
-            return
-        }
+    override fun performClick(): Boolean {
+        val activity = findMainActivity() ?: return super.performClick()
 
         val activeNavigation = readPrivateField<RecordedRoute>(activity, "localNavigationRoute")
         if (activeNavigation != null) {
-            delegatedClick?.onClick(view)
-            return
+            return super.performClick()
         }
 
         val selectedRoute = readPrivateField<RecordedRoute>(activity, "lastSavedRoute")
-        if (selectedRoute == null || selectedRoute.points.size < 2) {
-            delegatedClick?.onClick(view)
-            return
-        }
+            ?: return super.performClick()
+        if (selectedRoute.points.size < 2) return super.performClick()
 
         val currentLocation = readPrivateField<Location>(activity, "currentLocation")
         if (currentLocation == null) {
@@ -59,14 +38,13 @@ class OfficialStartNavigationButton @JvmOverloads constructor(
                 "Aguardando uma posição GPS válida para verificar o início da rota.",
                 Toast.LENGTH_LONG
             ).show()
-            return
+            return true
         }
 
         val officialStart = selectedRoute.points.first()
         val distanceToStart = distanceMeters(currentLocation, officialStart)
         if (distanceToStart <= OFFICIAL_START_TOLERANCE_METERS) {
-            delegatedClick?.onClick(view)
-            return
+            return super.performClick()
         }
 
         AlertDialog.Builder(activity)
@@ -81,6 +59,7 @@ class OfficialStartNavigationButton @JvmOverloads constructor(
                 calculateApproach(activity, currentLocation, selectedRoute)
             }
             .show()
+        return true
     }
 
     private fun calculateApproach(
@@ -104,7 +83,11 @@ class OfficialStartNavigationButton @JvmOverloads constructor(
                     isEnabled = true
                     text = "NAVEGAR NA ROTA SELECIONADA"
 
-                    val combined = buildCombinedRoute(selectedRoute, approach.points, approach.distanceMeters)
+                    val combined = buildCombinedRoute(
+                        selectedRoute,
+                        approach.points,
+                        approach.distanceMeters
+                    )
                     val started = invokeNavigateRoute(activity, combined)
                     if (!started) {
                         Toast.makeText(
@@ -115,8 +98,8 @@ class OfficialStartNavigationButton @JvmOverloads constructor(
                         return@runOnUiThread
                     }
 
-                    // navigateRoute altera lastSavedRoute para a rota temporária. Restauramos
-                    // a seleção original para que o percurso salvo nunca seja substituído.
+                    // A rota de acesso é temporária. Restauramos a rota selecionada
+                    // em memória para que o percurso salvo nunca seja substituído.
                     writePrivateField(activity, "lastSavedRoute", selectedRoute)
                     invokeSpeak(
                         activity,
