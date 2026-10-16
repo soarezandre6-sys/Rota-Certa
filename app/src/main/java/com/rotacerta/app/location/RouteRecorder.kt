@@ -81,8 +81,8 @@ class RouteRecorder(context: Context) {
         running = false
         onPoint = null
 
-        // Retorna a geometria ja encaixada nas ruas e, se o ultimo matching ainda
-        // nao terminou, preserva tambem a pequena cauda GPS ainda nao processada.
+        // No salvamento preserva uma pequena cauda GPS caso o ultimo lote ainda
+        // esteja em processamento. Assim nenhum trecho percorrido e perdido.
         return snapshot()
     }
 
@@ -91,9 +91,12 @@ class RouteRecorder(context: Context) {
     fun currentDistanceMeters(): Float = synchronized(lock) { totalDistanceMeters }
 
     /**
-     * A UI e o salvamento recebem preferencialmente a rota corrigida pela malha
-     * viaria. Enquanto um novo lote esta sendo processado, os ultimos pontos GPS
-     * sao mantidos no fim para que a linha nunca pare de crescer na tela.
+     * Durante a gravacao, depois que existe um matching valido, a polyline mostra
+     * somente a geometria confirmada da rua. Nao desenhamos a cauda GPS bruta por
+     * cima do mapa porque ela voltaria a cortar curvas/rotatorias enquanto aguarda
+     * a proxima resposta. A posicao atual continua sendo mostrada pelo GPS ao vivo.
+     *
+     * Ao encerrar, a cauda ainda nao processada e anexada para nao perder pontos.
      */
     fun snapshot(): List<RoutePoint> {
         val raw = synchronized(lock) { rawPoints.toList() }
@@ -101,7 +104,7 @@ class RouteRecorder(context: Context) {
         val consumed = matchedRawCount.coerceIn(0, raw.size)
 
         if (matched.size < 2 || consumed < 2) return raw
-        if (consumed >= raw.size) return matched
+        if (running || consumed >= raw.size) return matched
 
         val combined = ArrayList<RoutePoint>(matched.size + raw.size - consumed)
         combined += matched
@@ -152,7 +155,7 @@ class RouteRecorder(context: Context) {
             totalDistanceMeters
         }
 
-        // Primeiro atualiza imediatamente a UI; em seguida o map matching troca
+        // Primeiro atualiza imediatamente o estado; em seguida o map matching troca
         // o trecho bruto pela geometria real da rua assim que a resposta chega.
         onPoint?.invoke(point, distance)
         scheduleRoadMatchIfNeeded()
@@ -179,8 +182,8 @@ class RouteRecorder(context: Context) {
                 matchedPoints = corrected
                 matchedRawCount = source.size
 
-                // Forca um novo snapshot para a tela substituir o segmento reto
-                // pelo traçado encaixado nas ruas/rotatorias.
+                // Forca um novo snapshot para a tela substituir segmentos retos
+                // pelo traçado encaixado nas ruas e nas rotatorias.
                 if (running) {
                     onPoint?.invoke(source.last(), currentDistanceMeters())
                 }
