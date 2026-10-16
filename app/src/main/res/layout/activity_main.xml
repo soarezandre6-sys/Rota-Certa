@@ -211,7 +211,7 @@
                 app:backgroundTint="#5C3F99"
                 app:cornerRadius="14dp" />
 
-            <com.google.android.material.button.MaterialButton
+            <com.rotacerta.app.ui.OfficialStartNavigationButton
                 android:id="@+id/navigate_last_button"
                 android:layout_width="match_parent"
                 android:layout_height="50dp"
