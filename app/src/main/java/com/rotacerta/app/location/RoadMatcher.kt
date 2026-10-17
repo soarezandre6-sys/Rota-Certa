@@ -12,9 +12,10 @@ import kotlin.math.roundToInt
 /**
  * Faz map matching do rastro GPS na malha viaria do OpenStreetMap via OSRM.
  *
- * O objetivo aqui nao e apenas suavizar a linha: o retorno contem a geometria
- * real das ruas percorridas, incluindo curvas e rotatorias. Em caso de falha
- * de rede o chamador continua usando os pontos GPS brutos, sem perder a rota.
+ * Alem da posicao, o matching envia a direcao aproximada do deslocamento para
+ * evitar que o GPS seja encaixado em pistas paralelas, marginais ou acessos no
+ * sentido errado. Se o servico produzir um desvio muito maior que o rastro real,
+ * o resultado e rejeitado e o chamador continua usando o GPS bruto.
  */
 class RoadMatcher {
 
@@ -35,7 +36,7 @@ class RoadMatcher {
             start = (endExclusive - CHUNK_OVERLAP_POINTS).coerceAtLeast(start + 1)
         }
 
-        return merged.takeIf { it.size >= 2 }
+        return merged.takeIf { it.size >= 2 && isPlausibleMatch(rawPoints, it) }
     }
 
     private fun matchChunk(points: List<RoutePoint>): List<RoutePoint>? {
@@ -45,13 +46,22 @@ class RoadMatcher {
             String.format(Locale.US, "%.7f,%.7f", it.longitude, it.latitude)
         }
         val radiuses = points.joinToString(";") {
-            String.format(Locale.US, "%.1f", it.accuracy.coerceIn(MIN_RADIUS_METERS, MAX_RADIUS_METERS))
+            String.format(
+                Locale.US,
+                "%.1f",
+                it.accuracy.coerceIn(MIN_RADIUS_METERS, MAX_RADIUS_METERS)
+            )
+        }
+        val bearings = points.indices.joinToString(";") { index ->
+            estimateBearing(points, index)?.let { bearing ->
+                String.format(Locale.US, "%.0f,%.0f", bearing, BEARING_TOLERANCE_DEGREES)
+            } ?: ""
         }
 
         val url = URL(
             "$OSRM_MATCH_URL/$coordinates" +
                 "?geometries=geojson&overview=full&steps=false&gaps=ignore&tidy=true" +
-                "&radiuses=$radiuses"
+                "&radiuses=$radiuses&bearings=$bearings"
         )
 
         val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -65,7 +75,8 @@ class RoadMatcher {
         return try {
             if (connection.responseCode !in 200..299) return null
             val body = connection.inputStream.bufferedReader().use { it.readText() }
-            parseGeometry(body, points)
+            val matched = parseGeometry(body, points) ?: return null
+            matched.takeIf { isPlausibleMatch(points, it) }
         } catch (_: Exception) {
             null
         } finally {
@@ -82,6 +93,8 @@ class RoadMatcher {
 
         for (matchingIndex in 0 until matchings.length()) {
             val matching = matchings.optJSONObject(matchingIndex) ?: continue
+            if (matching.optDouble("confidence", 1.0) < MIN_MATCH_CONFIDENCE) return null
+
             val geometry = matching.optJSONObject("geometry") ?: continue
             val coordinates = geometry.optJSONArray("coordinates") ?: continue
             if (coordinates.length() < 2) continue
@@ -114,6 +127,88 @@ class RoadMatcher {
         }
 
         return result.takeIf { it.size >= 2 }
+    }
+
+    /**
+     * Usa a direcao do proprio rastro, e nao apenas o bearing informado pelo
+     * sensor. Procuramos pontos alguns metros antes/depois para evitar que ruido
+     * de GPS em amostras muito proximas aponte para a pista paralela errada.
+     */
+    private fun estimateBearing(points: List<RoutePoint>, index: Int): Float? {
+        var beforeIndex = index
+        while (beforeIndex > 0 &&
+            distanceMeters(points[beforeIndex], points[index]) < MIN_BEARING_BASELINE_METERS
+        ) {
+            beforeIndex -= 1
+        }
+
+        var afterIndex = index
+        while (afterIndex < points.lastIndex &&
+            distanceMeters(points[index], points[afterIndex]) < MIN_BEARING_BASELINE_METERS
+        ) {
+            afterIndex += 1
+        }
+
+        val from: RoutePoint
+        val to: RoutePoint
+        when {
+            beforeIndex < index && afterIndex > index -> {
+                from = points[beforeIndex]
+                to = points[afterIndex]
+            }
+            afterIndex > index -> {
+                from = points[index]
+                to = points[afterIndex]
+            }
+            beforeIndex < index -> {
+                from = points[beforeIndex]
+                to = points[index]
+            }
+            else -> return null
+        }
+
+        if (distanceMeters(from, to) < MIN_BEARING_BASELINE_METERS) return null
+
+        val start = Location("rota-certa-bearing").apply {
+            latitude = from.latitude
+            longitude = from.longitude
+        }
+        val end = Location("rota-certa-bearing").apply {
+            latitude = to.latitude
+            longitude = to.longitude
+        }
+
+        val bearing = start.bearingTo(end)
+        return if (bearing < 0f) bearing + 360f else bearing
+    }
+
+    /**
+     * O matcher nao pode inventar um contorno/retorno muito maior do que aquilo
+     * que foi realmente percorrido. Isso protege principalmente avenidas com
+     * pistas proximas, marginais e retornos em paralelo.
+     */
+    private fun isPlausibleMatch(source: List<RoutePoint>, matched: List<RoutePoint>): Boolean {
+        if (source.size < 2 || matched.size < 2) return false
+
+        val rawLength = routeLengthMeters(source)
+        val matchedLength = routeLengthMeters(matched)
+        if (rawLength <= 0f || matchedLength <= 0f) return false
+
+        val allowedLength = rawLength * MAX_MATCHED_LENGTH_RATIO + MAX_MATCHED_EXTRA_METERS
+        if (matchedLength > allowedLength) return false
+
+        if (distanceMeters(source.first(), matched.first()) > MAX_ENDPOINT_OFFSET_METERS) return false
+        if (distanceMeters(source.last(), matched.last()) > MAX_ENDPOINT_OFFSET_METERS) return false
+
+        return true
+    }
+
+    private fun routeLengthMeters(points: List<RoutePoint>): Float {
+        var total = 0f
+        for (index in 1 until points.size) {
+            total += distanceMeters(points[index - 1], points[index])
+        }
+        return total
     }
 
     /**
@@ -161,10 +256,20 @@ class RoadMatcher {
         private const val CHUNK_OVERLAP_POINTS = 6
         private const val MIN_POINTS_TO_MATCH = 4
 
+        // Uma tolerancia menor reduz o risco de atravessar para uma pista paralela.
+        // Se o GPS estiver pior que isso, e mais seguro manter o rastro bruto do que inventar uma rua.
         private const val MIN_RADIUS_METERS = 4f
-        private const val MAX_RADIUS_METERS = 45f
+        private const val MAX_RADIUS_METERS = 28f
         private const val MATCHED_ACCURACY_METERS = 4f
         private const val MIN_OUTPUT_SPACING_METERS = 0.8f
+
+        private const val MIN_BEARING_BASELINE_METERS = 6f
+        private const val BEARING_TOLERANCE_DEGREES = 70f
+        private const val MIN_MATCH_CONFIDENCE = 0.15
+
+        private const val MAX_MATCHED_LENGTH_RATIO = 1.25f
+        private const val MAX_MATCHED_EXTRA_METERS = 35f
+        private const val MAX_ENDPOINT_OFFSET_METERS = 35f
 
         private const val CONNECT_TIMEOUT_MS = 2_500
         private const val READ_TIMEOUT_MS = 4_000
